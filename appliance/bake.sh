@@ -60,7 +60,11 @@ LOOP="$(losetup -fP --show "${RAW}")"
 
 # Partition 6 is OEM on every Flatcar image. Asserted rather than assumed: a
 # layout change would otherwise write the config into whatever is at p6 now.
-LABEL="$(lsblk -no PARTLABEL "${LOOP}p6")"
+#
+# blkid, not `lsblk -no PARTLABEL`. On a loop device lsblk returns an empty
+# string for PARTLABEL while blkid reads it correctly, so the lsblk version of
+# this check failed on its own image.
+LABEL="$(blkid -s PARTLABEL -o value "${LOOP}p6")"
 [ "${LABEL}" = "OEM" ] || { echo "p6 is '${LABEL}', not OEM. Layout changed; fix this script." >&2; exit 1; }
 
 mkdir -p "${OEM_MNT}"
