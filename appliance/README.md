@@ -7,8 +7,50 @@ only. No custom OS image, no package manager, nothing compiled.
 ./build.sh --fetch      # transpile butane.yaml into build/config.ign
 ```
 
-Status: **the config works and has been booted end to end.** There is no
-downloadable image yet. See the [roadmap](https://arcio.au/docs/roadmap/).
+Status: **a baked qcow2 boots into a working Arcio with nothing supplied by the
+hypervisor.** There is no published image yet, and no OVA or VHD. See the
+[roadmap](https://arcio.au/docs/roadmap/).
+
+## Building an image
+
+```bash
+./build.sh --fetch                                   # config.ign + the sysext
+sudo ./bake.sh flatcar_production_qemu_image.img     # -> build/arcio-os-<ver>.qcow2
+```
+
+`bake.sh` writes `config.ign` and the compose sysext onto the **OEM partition**,
+which is the partition Flatcar provides for this and the only one it touches. It
+also strips `flatcar.autologin` from the OEM `grub.cfg`.
+
+That last one is not cosmetic. Flatcar's QEMU image ships autologin, so the
+console comes up as a shell with sudo and no password. On a developer image you
+booted yourself that is convenient; on an appliance somebody imports it is an
+unauthenticated root shell, and it makes the password first boot generates
+purely decorative. Found by screendumping the M1 console and seeing a
+`core@arcio` prompt nobody had logged into.
+
+Verified on a baked image with no `args` on the VM at all:
+
+```
+/oem/config.ign                       12008 bytes
+/oem/docker-compose.raw            11063296
+/etc/extensions/docker-compose.raw 11063296   (copied at first boot)
+
+flatcar.autologin   not on the kernel command line
+firstboot log       0 network calls, sysext came from /oem
+update-engine       masked        locksmithd  masked
+health              {"ok":true,"version":"0.10.0"}
+```
+
+## It is not an offline image yet
+
+Baking the sysext removes one network dependency from first boot. It does not
+remove them all: `docker compose up -d` still pulls about half a gigabyte of
+application and PostgreSQL images from `ghcr.io`.
+
+A genuinely air-gapped appliance needs those pre-loaded into the Docker storage
+too. That is the offline bundle, and it is not built. **Do not describe this
+image as air-gapped until it is.**
 
 ## Booting it for development
 
@@ -87,11 +129,16 @@ application updates, where they are visible and scheduled.
 
 ## Still open
 
-- **Baking the config into an image** so a customer imports a file rather than
-  supplying Ignition. `/oem` is confirmed as the target.
-- **Per-hypervisor artefacts.** VMware can take Ignition through OVF guestinfo,
-  which also lets a customer override at deploy time; qcow2 and VHD cannot.
+- **The offline bundle.** Pre-loaded container images, so first boot needs no
+  network at all. This is the blocker on calling anything air-gapped.
+- **Per-hypervisor artefacts.** Only qcow2 today. VMware can take Ignition
+  through OVF guestinfo, which also lets a customer override at deploy time;
+  VHD cannot, so Hyper-V needs the baked path.
+- **Publishing.** Images need signing and somewhere to live. Cosign on the blob
+  and a GitHub Release is the obvious shape, and `arcioctl import` already
+  verifies blob signatures.
 - **Disk sizing.** An image forces a number, and the minimum spec is still
   undocumented.
-- **Air-gapped OS updates.** The mechanism exists (`arcioctl import` verifies a
-  signed bundle); the packaging does not.
+- **OS updates.** The updater ships masked, so something has to take
+  responsibility for OS patching. `arcioctl` is the intended route and does not
+  do it yet.
