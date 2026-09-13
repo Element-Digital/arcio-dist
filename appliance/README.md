@@ -8,8 +8,8 @@ only. No custom OS image, no package manager, nothing compiled.
 ```
 
 Status: **a baked qcow2 boots into a working Arcio with nothing supplied by the
-hypervisor, and does it with no route to any registry.** There is no published
-image yet, and no OVA or VHD. See the
+hypervisor, and does it with no route to any registry.** qcow2, OVA and VHDX
+all build. Nothing is published yet. See the
 [roadmap](https://arcio.au/docs/roadmap/).
 
 ## Building an image
@@ -88,6 +88,55 @@ Caddy is in the bundle despite only running under the `tls` profile. An
 air-gapped site that later decides it wants TLS should not find that the one
 thing it needs is the one thing it has to download.
 
+## Artefacts
+
+```bash
+./package.sh build/arcio-os-4081.3.10.qcow2
+```
+
+| | | |
+|---|---|---|
+| `.qcow2` | Proxmox, KVM, libvirt | **boot-tested** |
+| `.ova` | VMware ESXi, vSphere, Workstation | structure only |
+| `.vhdx` | Hyper-V **generation 2** | structure only |
+
+There is no ESXi or Hyper-V here, so the OVA and VHDX are validated and not
+booted: the tar order is asserted, the manifest checksums are verified against
+the files, and `qemu-img` reads both disks back. Only the qcow2 has run.
+
+Two things in the OVA are load-bearing and easy to get wrong. The tar order is
+descriptor, manifest, disks, because readers stream it and a misordered archive
+fails with a message about a missing descriptor that reads like a corrupt
+download. And `firmware=efi` is set, because the image is GPT with an EFI System
+Partition and no BIOS bootloader, so a default-firmware VM imports cleanly and
+then fails to boot with no obvious cause. **Hyper-V must be generation 2** for
+the same reason.
+
+## Sizing
+
+Measured on an idle appliance with a seeded but empty model, not estimated:
+
+| | |
+|---|---|
+| Memory, whole VM | 791 MB used of 3915 |
+| Memory, containers | Arcio 161 MB, PostgreSQL 65 MB |
+| Disk | 1.7 GB used of 36 GB |
+| Of which images | 1.1 GB |
+| Database | 12 MB |
+| Load average | 0.08 |
+
+So the floor is **2 vCPU, 4 GB, 40 GB**, which is what the OVA declares.
+
+Read that as a floor and not a sizing guide. It is an empty install doing
+nothing: the figures that matter under load are graph walks, report
+aggregations and integration syncs, and none of those have been measured. The
+database is the part that grows, and it grows with the size of the model and
+how much history is kept, not with the number of users.
+
+40 GB is generous on purpose. The disk is sparse, so an unused gigabyte costs
+nothing in the artefact or on the datastore, and growing a VMware disk later is
+a maintenance window nobody wants for a product whose job is to avoid those.
+
 ## Booting it for development
 
 ```bash
@@ -165,14 +214,11 @@ application updates, where they are visible and scheduled.
 
 ## Still open
 
-- **Per-hypervisor artefacts.** Only qcow2 today. VMware can take Ignition
-  through OVF guestinfo, which also lets a customer override at deploy time;
-  VHD cannot, so Hyper-V needs the baked path.
+- **Boot-testing the OVA and VHDX.** Both are built and structurally valid;
+  neither has been imported into the hypervisor it is for.
 - **Publishing.** Images need signing and somewhere to live. Cosign on the blob
   and a GitHub Release is the obvious shape, and `arcioctl import` already
   verifies blob signatures.
-- **Disk sizing.** An image forces a number, and the minimum spec is still
-  undocumented.
 - **OS updates.** The updater ships masked, so something has to take
   responsibility for OS patching. `arcioctl` is the intended route and does not
   do it yet.
