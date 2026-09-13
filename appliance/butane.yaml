@@ -1,0 +1,236 @@
+variant: flatcar
+version: 1.1.0
+
+# Arcio OS — the whole appliance, as one Ignition config.
+#
+# Transpile with `butane --strict butane.yaml -o config.ign`, then either bake
+# the result into the OEM partition of a stock Flatcar image (the appliance) or
+# hand it to the hypervisor at first boot (development). See build.sh.
+#
+# ── What this is and is not ─────────────────────────────────────────────────
+#
+# It is a stock Flatcar LTS turned into an Arcio appliance by configuration
+# only. There is no custom OS image, no package manager, and nothing compiled
+# here. Everything below is a file, a unit or a sysext.
+#
+# ── Facts this is written against ───────────────────────────────────────────
+#
+# Established by booting Flatcar LTS 4081.3.10 on 2026-09-14, not assumed:
+#
+#   * Flatcar ships Docker 26.1.0 and docker-buildx. It does **not** ship
+#     `docker compose`. Docker itself arrives as a systemd-sysext, so compose
+#     does too — see the docker-compose extension below.
+#   * /opt is writable as root and is a valid sysext hierarchy.
+#   * /usr is read-only, so arcioctl cannot go in /usr/local/bin the way the
+#     Docker install guide puts it. /opt/bin, and the unit calls it by path.
+#   * The root partition auto-grows to fill the disk.
+#   * The OEM partition mounts at /oem.
+
+passwd:
+  users:
+    - name: core
+      groups:
+        - sudo
+        - docker
+
+storage:
+  directories:
+    - path: /opt/arcio
+      mode: 0755
+    - path: /opt/bin
+      mode: 0755
+    - path: /etc/extensions
+      mode: 0755
+    - path: /var/lib/arcio
+      mode: 0700
+
+  files:
+    - path: /etc/hostname
+      mode: 0644
+      contents:
+        inline: arcio
+
+    # ── compose ─────────────────────────────────────────────────────────────
+    #
+    # Fetched at build time by build.sh and inlined here, rather than pulled at
+    # first boot. An appliance that needs the internet to finish booting is not
+    # an appliance, and an air-gapped one would never finish at all.
+    - path: /opt/arcio/compose.yaml
+      mode: 0644
+      contents:
+        local: build/compose.yaml
+
+    - path: /opt/arcio/.env
+      mode: 0600
+      contents:
+        inline: |
+          # Pinned by the build. arcioctl update rewrites this line.
+          ARCIO_VERSION=edge
+          TZ=UTC
+
+    - path: /opt/bin/arcioctl
+      mode: 0755
+      contents:
+        local: build/arcioctl
+
+    # ── the compose plugin, as a sysext ─────────────────────────────────────
+    #
+    # The Flatcar-native way to add software: an immutable squashfs merged into
+    # /usr at boot, which survives OS updates and leaves /usr read-only. The
+    # alternative was dropping a binary into a plugin directory under /root,
+    # which works and then quietly stops working the first time anything runs
+    # as a different user.
+    - path: /etc/extensions/docker-compose.raw
+      mode: 0644
+      contents:
+        local: build/docker-compose.raw
+
+    # ── first boot ──────────────────────────────────────────────────────────
+    - path: /opt/bin/arcio-firstboot
+      mode: 0755
+      contents:
+        inline: |
+          #!/usr/bin/env bash
+          # Runs once. Generates what must not be baked into a shipped image,
+          # then tells whoever is looking at the console what they need.
+          set -euo pipefail
+
+          STAMP=/var/lib/arcio/.firstboot
+          [ -f "${STAMP}" ] && exit 0
+
+          # A password for the console account. Not baked in, because every
+          # appliance would then ship with the same one, and it is extractable
+          # by anyone who runs `qemu-img` over the file.
+          PASS="$(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | head -c 20)"
+          echo "core:${PASS}" | chpasswd
+          printf '%s\n' "${PASS}" > /var/lib/arcio/console-password
+          chmod 600 /var/lib/arcio/console-password
+
+          # BASE_URL has to be a real address or every link in an email Arcio
+          # sends points at a machine the recipient does not have.
+          IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -1)"
+          if ! grep -q '^ARCIO_BASE_URL=' /opt/arcio/.env; then
+            printf 'ARCIO_BASE_URL=http://%s:3001\n' "${IP}" >> /opt/arcio/.env
+          fi
+
+          touch "${STAMP}"
+
+          # /etc/issue puts this on the console login screen, which is where
+          # somebody who has just imported an OVA is actually looking.
+          cat > /etc/issue <<EOF
+
+            Arcio appliance
+
+            Web        http://${IP}:3001
+            Console    core / ${PASS}
+
+            The web administrator password is printed in the application log:
+              sudo /opt/bin/arcioctl logs | grep -i password
+
+            Write the console password down. It is shown here and stored at
+            /var/lib/arcio/console-password, and nowhere else.
+
+          EOF
+
+    # ── the OS updater ──────────────────────────────────────────────────────
+    #
+    # Off, deliberately, and this is a decision rather than an oversight.
+    #
+    # Stock Flatcar schedules an update check about two minutes after boot
+    # against public.update.flatcar-linux.net and lets locksmithd reboot to
+    # apply it. On an appliance that means two things nobody asked for: an
+    # outbound connection that is not on the published egress list at
+    # https://arcio.au/docs/network/, and an unannounced reboot of the
+    # architecture repository.
+    #
+    # Air-gapped mode cannot stop either. It is an application-level control
+    # and update_engine is a host process, so the switch that customers are
+    # told stops all outbound traffic would not have reached it.
+    #
+    # So the appliance ships with OS updates off and takes them through
+    # arcioctl, alongside application updates, where they are visible and
+    # scheduled. Turning them back on is one file and is documented.
+    - path: /etc/flatcar/update.conf
+      mode: 0644
+      contents:
+        inline: |
+          SERVER=disabled
+          REBOOT_STRATEGY=off
+
+systemd:
+  units:
+    # Flatcar's own updater and reboot manager. Masked rather than disabled:
+    # disabled units can still be started by a dependency, and the point is
+    # that nothing reboots this box without an administrator.
+    - name: update-engine.service
+      mask: true
+    - name: locksmithd.service
+      mask: true
+
+    - name: arcio-firstboot.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Arcio first boot
+        After=network-online.target
+        Wants=network-online.target
+        ConditionPathExists=!/var/lib/arcio/.firstboot
+        Before=arcio.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/opt/bin/arcio-firstboot
+
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: arcio.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Arcio
+        After=docker.service arcio-firstboot.service
+        Requires=docker.service
+        Wants=arcio-firstboot.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        WorkingDirectory=/opt/arcio
+        # No TimeoutStartSec default: the first start pulls images, applies
+        # migrations and seeds, which on a slow link is minutes rather than the
+        # 90 seconds systemd would otherwise allow before calling it failed.
+        TimeoutStartSec=0
+        ExecStart=/usr/bin/docker compose up -d --remove-orphans
+        ExecStop=/usr/bin/docker compose down
+
+        [Install]
+        WantedBy=multi-user.target
+
+    # Backups are the one thing an appliance must not leave to somebody
+    # remembering. See https://arcio.au/docs/backup-restore/ for why the
+    # database alone is not a backup.
+    - name: arcio-backup.service
+      contents: |
+        [Unit]
+        Description=Arcio backup
+        After=arcio.service
+        Requires=arcio.service
+
+        [Service]
+        Type=oneshot
+        ExecStart=/opt/bin/arcioctl backup
+
+    - name: arcio-backup.timer
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Nightly Arcio backup
+
+        [Timer]
+        OnCalendar=*-*-* 02:30:00
+        Persistent=true
+
+        [Install]
+        WantedBy=timers.target
