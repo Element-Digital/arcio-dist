@@ -1,0 +1,88 @@
+# Arcio — the Docker install method.
+#
+#   curl -O https://raw.githubusercontent.com/Element-Digital/Arcio/main/compose.yaml
+#   docker compose up -d
+#
+# That is the whole installation. Secrets are generated on first run into the
+# `arcio-data` volume; nothing needs editing before it starts.
+#
+# TLS is not on by default. Most installs sit behind a reverse proxy the
+# customer already runs, and terminating twice is worse than not terminating
+# here. `--profile tls` adds Caddy for the installs that do not — see below.
+
+name: arcio
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: arcio
+      POSTGRES_DB: arcio
+      # Only ever reachable on the internal compose network — the port is not
+      # published. Override it if you publish 5432, and then do not publish it.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arcio}
+    volumes:
+      - arcio-db:/var/lib/postgresql/data
+    healthcheck:
+      # `-d arcio` matters: without it pg_isready checks a database named after
+      # the user, reports ready, and the app connects to a database that is
+      # still being created.
+      test: ['CMD-SHELL', 'pg_isready -U arcio -d arcio']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  arcio:
+    # `stable` is the newest release; `edge` is the head of main. There is no
+    # `:latest` tag on purpose — in Arcio's own vocabulary "latest" is the
+    # every-commit channel, the opposite of what Docker convention means by it.
+    image: ghcr.io/element-digital/arcio:${ARCIO_VERSION:-stable}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://arcio:${POSTGRES_PASSWORD:-arcio}@db:5432/arcio
+      # Reachable address, used for links in notification and survey email and
+      # for the SSO redirect URI. Wrong here means working sign-in and broken
+      # links in mail, which is a confusing way to find out.
+      BASE_URL: ${ARCIO_BASE_URL:-http://localhost:3001}
+      # Behind a reverse proxy, set this so the audit log and the sign-in CIDR
+      # allow-list see the client address rather than the proxy's.
+      # TRUST_PROXY: 'true'
+      TZ: ${TZ:-UTC}
+    volumes:
+      - arcio-data:/data
+    ports:
+      - '${ARCIO_PORT:-3001}:3001'
+
+  # `docker compose --profile tls up -d`
+  #
+  # Caddy with an internal CA, so the appliance answers on https immediately
+  # with a self-signed certificate rather than serving plain http and leaving
+  # it to be noticed later. Point CADDY_SITE at a real hostname and Caddy takes
+  # a Let's Encrypt certificate instead.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ['tls']
+    restart: unless-stopped
+    depends_on: [arcio]
+    environment:
+      CADDY_SITE: ${CADDY_SITE:-https://:8443}
+    command: caddy reverse-proxy --from "${CADDY_SITE:-https://:8443}" --to arcio:3001
+    ports:
+      - '${CADDY_HTTP_PORT:-8080}:80'
+      - '${CADDY_HTTPS_PORT:-8443}:8443'
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  arcio-db:
+  # Holds secrets.env and uploads. BACK THIS UP ALONGSIDE THE DATABASE — a
+  # dump without FIELD_ENCRYPTION_KEY cannot restore any encrypted column.
+  arcio-data:
+  caddy-data:
+  caddy-config:

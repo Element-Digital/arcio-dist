@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# arcioctl — the supervisor, as a script rather than a daemon.
+#
+# Home Assistant's Supervisor is a privileged container holding the Docker
+# socket. Ours is not, deliberately: a container with the socket mounted is
+# root-equivalent on the host, and services/updateRunner.ts documents
+# engineering away from exactly that so the network-facing process keeps
+# NoNewPrivileges and holds no privilege. Copying HA's shape would hand that
+# back for nothing we need. See docs/distribution.md.
+#
+# Runs on the HOST — the Flatcar appliance, or any machine using the Docker
+# install method — and drives `docker compose`.
+#
+#   arcioctl status              what is running, and is it healthy
+#   arcioctl backup              database + data volume, timestamped
+#   arcioctl restore <file>      from a backup archive
+#   arcioctl update [tag]        pull, migrate, verify, roll back on failure
+#   arcioctl import <bundle>     load a signed offline image bundle
+#   arcioctl diagnostics         write a support bundle to ./diagnostics/
+#   arcioctl logs [service]      follow
+
+PROJECT_DIR="${ARCIO_DIR:-/opt/arcio}"
+BACKUP_DIR="${ARCIO_BACKUP_DIR:-${PROJECT_DIR}/backups}"
+KEEP_BACKUPS="${ARCIO_KEEP_BACKUPS:-14}"
+HEALTH_TIMEOUT="${ARCIO_HEALTH_TIMEOUT:-180}"
+
+cd "${PROJECT_DIR}"
+compose() { docker compose "$@"; }
+say() { printf '\033[0;36m›\033[0m %s\n' "$*"; }
+ok() { printf '\033[0;32m✓\033[0m %s\n' "$*"; }
+die() { printf '\033[0;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+current_image() { compose config --images 2>/dev/null | grep -m1 'arcio' || true; }
+
+# Healthy means the app answers, not that the container is running. A container
+# that started and then failed its first query is "up" to Docker and useless to
+# a user, and that is precisely the state an update must not be left in.
+wait_healthy() {
+  local waited=0
+  while [ "${waited}" -lt "${HEALTH_TIMEOUT}" ]; do
+    if compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  return 1
+}
+
+cmd_status() {
+  compose ps
+  echo
+  if compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health 2>/dev/null; then
+    echo
+    ok "Healthy"
+  else
+    die "Not answering on /api/health"
+  fi
+}
+
+cmd_backup() {
+  mkdir -p "${BACKUP_DIR}"
+  local stamp archive
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive="${BACKUP_DIR}/arcio-${stamp}.tar.gz"
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "${work}"' RETURN
+
+  say "Dumping the database..."
+  compose exec -T db pg_dump -U arcio -d arcio --clean --if-exists > "${work}/arcio.sql"
+
+  # The data volume carries secrets.env. A dump without FIELD_ENCRYPTION_KEY
+  # restores every table and decrypts none of the credentials in them, which is
+  # a restore that looks like it worked — so the two travel together.
+  say "Copying the data volume..."
+  docker run --rm -v arcio_arcio-data:/data:ro -v "${work}:/out" alpine:3 \
+    tar -czf /out/data.tar.gz -C /data . 2>/dev/null
+
+  tar -czf "${archive}" -C "${work}" arcio.sql data.tar.gz
+  chmod 600 "${archive}"
+
+  # Verify rather than assume. A backup nobody has read is a hypothesis.
+  tar -tzf "${archive}" >/dev/null || die "Archive did not verify: ${archive}"
+
+  ls -1t "${BACKUP_DIR}"/arcio-*.tar.gz 2>/dev/null | tail -n "+$((KEEP_BACKUPS + 1))" \
+    | xargs -r rm -f
+
+  ok "Backup: ${archive} ($(du -h "${archive}" | cut -f1))"
+  echo "${archive}"
+}
+
+cmd_restore() {
+  local archive="${1:-}"
+  [ -f "${archive}" ] || die "Usage: arcioctl restore <archive.tar.gz>"
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "${work}"' RETURN
+  tar -xzf "${archive}" -C "${work}"
+
+  say "Stopping the application (leaving the database up)..."
+  compose stop arcio
+
+  say "Restoring the database..."
+  compose exec -T db psql -U arcio -d arcio -v ON_ERROR_STOP=1 < "${work}/arcio.sql"
+
+  say "Restoring the data volume..."
+  docker run --rm -v arcio_arcio-data:/data -v "${work}:/in:ro" alpine:3 \
+    sh -c 'rm -rf /data/* && tar -xzf /in/data.tar.gz -C /data'
+
+  compose up -d arcio
+  wait_healthy || die "Restored, but the application is not healthy. Check: arcioctl logs"
+  ok "Restored from ${archive}"
+}
+
+cmd_update() {
+  local target="${1:-}"
+  local previous
+  previous="$(current_image)"
+  say "Currently running: ${previous:-unknown}"
+
+  # Before the pull, not after. Migrations are forward-only — `prisma migrate
+  # deploy` has no down step — so once a new version has altered the schema,
+  # putting the old image back is not a rollback on its own. The backup is what
+  # makes the rollback below real rather than aspirational.
+  say "Taking a backup first..."
+  local safety
+  safety="$(cmd_backup | tail -1)"
+
+  if [ -n "${target}" ]; then
+    say "Pinning ARCIO_VERSION=${target}"
+    if grep -q '^ARCIO_VERSION=' .env 2>/dev/null; then
+      sed -i "s|^ARCIO_VERSION=.*|ARCIO_VERSION=${target}|" .env
+    else
+      echo "ARCIO_VERSION=${target}" >> .env
+    fi
+  fi
+
+  say "Pulling..."
+  compose pull arcio
+
+  say "Restarting..."
+  compose up -d arcio
+
+  if wait_healthy; then
+    ok "Updated and healthy."
+    compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health
+    return 0
+  fi
+
+  printf '\033[0;31m✗\033[0m %s\n' "New version did not become healthy — rolling back." >&2
+  compose logs --tail 50 arcio >&2 || true
+  cmd_restore "${safety}"
+  die "Rolled back to the pre-update state. The failed version's logs are above."
+}
+
+# The air-gapped path: an image bundle carried in, rather than pulled.
+cmd_import() {
+  local bundle="${1:-}"
+  [ -f "${bundle}" ] || die "Usage: arcioctl import <bundle.tar>"
+
+  # Verified before it is loaded, not after. A bundle that arrived on a USB
+  # stick has a worse provenance story than a registry pull, so the signature
+  # is the only thing standing in for the transport.
+  if command -v cosign >/dev/null 2>&1 && [ -f "${bundle}.sig" ]; then
+    say "Verifying signature..."
+    cosign verify-blob --signature "${bundle}.sig" \
+      --certificate-identity-regexp 'https://github.com/Element-Digital/Arcio/.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      "${bundle}" || die "Signature did not verify — do not load this bundle."
+    ok "Signature verified."
+  else
+    printf '\033[0;33m!\033[0m %s\n' "No cosign or no .sig alongside the bundle — loading unverified." >&2
+  fi
+
+  say "Loading images..."
+  docker load -i "${bundle}"
+  ok "Loaded. Now: arcioctl update <tag>"
+}
+
+# The command-line route to a support bundle, for an appliance with nobody
+# logged into the UI — and for an air-gapped install, where downloading and
+# carrying the file out is the only path that exists.
+#
+# Goes through the app's own endpoint rather than reading the database, so the
+# bundle is scrubbed by the same code the UI uses. A second implementation here
+# would be a second thing to get wrong, and the thing it would get wrong is
+# redaction.
+cmd_diagnostics() {
+  local days="${1:-7}"
+  mkdir -p "${PROJECT_DIR}/diagnostics"
+  say "Building a ${days}-day bundle..."
+  local out
+  out="${PROJECT_DIR}/diagnostics/arcio-diagnostics-$(date -u +%Y%m%dT%H%M%SZ).json"
+  compose exec -T arcio node -e "
+    import('./backend/dist/services/diagnostics.js').then(async (m) => {
+      const b = await m.buildBundle({ days: ${days} });
+      process.stdout.write(m.serialiseBundle(b));
+    }).catch((e) => { console.error(e); process.exit(1); });
+  " > "${out}" || die "Could not build a bundle — is the application running? arcioctl status"
+  chmod 600 "${out}"
+  ok "Bundle: ${out} ($(du -h "${out}" | cut -f1))"
+  echo "Read it before you send it. Attach it to your support ticket."
+}
+
+case "${1:-}" in
+  status)  shift; cmd_status "$@" ;;
+  diagnostics) shift; cmd_diagnostics "$@" ;;
+  backup)  shift; cmd_backup "$@" >/dev/null && ok "Done" ;;
+  restore) shift; cmd_restore "$@" ;;
+  update)  shift; cmd_update "$@" ;;
+  import)  shift; cmd_import "$@" ;;
+  logs)    shift; compose logs -f "${1:-arcio}" ;;
+  *)
+    sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

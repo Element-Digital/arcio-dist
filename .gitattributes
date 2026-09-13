@@ -1,0 +1,5 @@
+# arcioctl and the entrypoint are shell, and must stay LF whatever the
+# checkout platform does. A CRLF shebang is "bad interpreter" on Linux.
+* text=auto eol=lf
+*.yaml text eol=lf
+bin/arcioctl text eol=lf
