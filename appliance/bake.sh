@@ -40,6 +40,8 @@ SRC="${1:-}"
 BUILD=build
 OEM_MNT="${OEM_MNT:-/mnt/arcio-oem}"
 ROOT_MNT="${ROOT_MNT:-/mnt/arcio-root}"
+# 40G measured, not picked: see README > Sizing.
+DISK_SIZE="${ARCIO_DISK_SIZE:-40G}"
 
 [ -n "${SRC}" ] || { echo "usage: sudo ./bake.sh <flatcar image>" >&2; exit 1; }
 [ -f "${SRC}" ] || { echo "no such image: ${SRC}" >&2; exit 1; }
@@ -65,6 +67,20 @@ trap cleanup EXIT
 
 say "Converting to raw..."
 qemu-img convert -O raw "${SRC}" "${RAW}"
+
+# ── disk size ───────────────────────────────────────────────────────────────
+#
+# Flatcar's image is 8.5GB, and the root partition inside it is 6.2GB. That is
+# not enough: the loaded container images alone are 1.1GB, the bundle is
+# another 400MB until it is deleted, and what is left has to hold a database
+# that grows for years.
+#
+# Growing the *disk* is all that is needed. Flatcar extends partition 9 and its
+# filesystem on first boot, which is how a 40GB disk became 37.7GB of root on
+# every test so far. Sparse the whole way, so the artefact does not grow with
+# the number.
+say "Growing the disk to ${DISK_SIZE}..."
+qemu-img resize -f raw "${RAW}" "${DISK_SIZE}" >/dev/null
 
 say "Attaching..."
 LOOP="$(losetup -fP --show "${RAW}")"
