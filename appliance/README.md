@@ -8,7 +8,8 @@ only. No custom OS image, no package manager, nothing compiled.
 ```
 
 Status: **a baked qcow2 boots into a working Arcio with nothing supplied by the
-hypervisor.** There is no published image yet, and no OVA or VHD. See the
+hypervisor, and does it with no route to any registry.** There is no published
+image yet, and no OVA or VHD. See the
 [roadmap](https://arcio.au/docs/roadmap/).
 
 ## Building an image
@@ -42,15 +43,50 @@ update-engine       masked        locksmithd  masked
 health              {"ok":true,"version":"0.10.0"}
 ```
 
-## It is not an offline image yet
+## Offline
 
-Baking the sysext removes one network dependency from first boot. It does not
-remove them all: `docker compose up -d` still pulls about half a gigabyte of
-application and PostgreSQL images from `ghcr.io`.
+```bash
+./bundle.sh                                          # -> build/images.tar.gz
+./build.sh --fetch
+sudo ./bake.sh flatcar_production_qemu_image.img     # picks the bundle up
+```
 
-A genuinely air-gapped appliance needs those pre-loaded into the Docker storage
-too. That is the offline bundle, and it is not built. **Do not describe this
-image as air-gapped until it is.**
+`bundle.sh` saves the three images compose needs. `bake.sh` writes the bundle to
+the **root** partition, because OEM is 128 MB and the bundle is about 400 MB
+compressed from 1.1 GB of images. `arcio-load-images.service` loads it before
+`arcio.service` and deletes it afterwards, since by then it is a duplicate of
+what is already in Docker's storage.
+
+The bundle is optional. Without it the appliance pulls from `ghcr.io` like any
+other install, and `bake.sh` says so loudly, because an image that quietly needs
+a registry is the one that gets handed to an air-gapped customer.
+
+**Verified with egress actually blocked**, on a VM with a Proxmox firewall
+policy of `policy_out: DROP` and only local VLANs and DHCP permitted:
+
+```
+ghcr.io                       UNREACHABLE
+arcio-load-images.service     Loaded image: postgres:16-alpine
+                              Loaded image: caddy:2-alpine
+                              Loaded image: ghcr.io/element-digital/arcio:edge
+                              Finished, 73 seconds
+/opt/arcio/images.tar.gz      deleted after load
+containers                    arcio-arcio-1  Up (healthy)
+                              arcio-db-1     Up (healthy)
+health                        {"ok":true,"version":"0.10.0"}
+```
+
+Two notes from building that test. The first version of the firewall rule
+blocked DHCP as well as egress, so the appliance came up with no address at all
+— which is a real scenario on a network without a DHCP server, and it found a
+bug where first boot wrote `ARCIO_BASE_URL=http://:3001` and carried on. And
+`arcio-load-images` is its own unit rather than part of first boot, because
+first boot installs the compose sysext, which re-merges `/usr`, and Docker is
+itself delivered as a sysext living in `/usr`.
+
+Caddy is in the bundle despite only running under the `tls` profile. An
+air-gapped site that later decides it wants TLS should not find that the one
+thing it needs is the one thing it has to download.
 
 ## Booting it for development
 
@@ -129,8 +165,6 @@ application updates, where they are visible and scheduled.
 
 ## Still open
 
-- **The offline bundle.** Pre-loaded container images, so first boot needs no
-  network at all. This is the blocker on calling anything air-gapped.
 - **Per-hypervisor artefacts.** Only qcow2 today. VMware can take Ignition
   through OVF guestinfo, which also lets a customer override at deploy time;
   VHD cannot, so Hyper-V needs the baked path.
