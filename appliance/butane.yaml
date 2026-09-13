@@ -164,12 +164,27 @@ storage:
 
           # BASE_URL has to be a real address or every link in an email Arcio
           # sends points at a machine the recipient does not have.
-          IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -1)"
-          if ! grep -q '^ARCIO_BASE_URL=' /opt/arcio/.env; then
+          #
+          # An empty IP is a real case, not a defensive flourish: an appliance
+          # booted where there is no DHCP server comes up with no global
+          # address, and the naive version of this wrote
+          # `ARCIO_BASE_URL=http://:3001` into the config and carried on. Better
+          # to leave it unset, let compose fall back to localhost, and say so on
+          # the console than to bake a malformed URL nobody looks at again.
+          IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
+          if [ -n "${IP}" ] && ! grep -q '^ARCIO_BASE_URL=' /opt/arcio/.env; then
             printf 'ARCIO_BASE_URL=http://%s:3001\n' "${IP}" >> /opt/arcio/.env
           fi
 
           touch "${STAMP}"
+
+          # An appliance that did not get an address should say so on the
+          # console rather than print a broken URL at somebody.
+          if [ -n "${IP}" ]; then
+            WEB="http://${IP}:3001"
+          else
+            WEB="no address. This appliance got none from DHCP; set one and reboot"
+          fi
 
           # /etc/issue puts this on the console login screen, which is where
           # somebody who has just imported an OVA is actually looking.
@@ -177,7 +192,7 @@ storage:
 
             Arcio appliance
 
-            Web        http://${IP}:3001
+            Web        ${WEB}
             Console    core / ${PASS}
 
             The web administrator password is printed in the application log:
