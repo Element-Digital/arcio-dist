@@ -185,11 +185,22 @@ storage:
     # So the appliance ships with OS updates off and takes them through
     # arcioctl, alongside application updates, where they are visible and
     # scheduled. Turning them back on is one file and is documented.
+    #
+    # overwrite is required: Flatcar ships this file, and Ignition refuses to
+    # replace an existing path unless told to. Without it the whole config
+    # fails and the machine reboot-loops into an emergency shell, which is how
+    # this line came to be here.
+    #
+    # GROUP is preserved rather than cleared. Masking the units is what
+    # actually stops updates; this file decides what would happen if somebody
+    # unmasked them, and the answer should be "LTS, and do not reboot on your
+    # own" rather than whatever the default was.
     - path: /etc/flatcar/update.conf
       mode: 0644
+      overwrite: true
       contents:
         inline: |
-          SERVER=disabled
+          GROUP=lts
           REBOOT_STRATEGY=off
 
 systemd:
