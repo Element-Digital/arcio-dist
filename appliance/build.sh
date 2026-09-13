@@ -63,8 +63,30 @@ cp ../compose.yaml "${BUILD}/compose.yaml"
 cp ../bin/arcioctl "${BUILD}/arcioctl"
 
 need butane
+
+# A development affordance, and deliberately not a product one.
+#
+# The shipped appliance has no SSH key in it: a customer reaches it on the
+# console with the password first boot generates. That is also unworkable while
+# building the thing, because reading a failed unit's journal needs a shell and
+# the password lives on a console you cannot paste into.
+#
+# ARCIO_DEV_SSH_KEY adds one for a build you are about to throw away. It is an
+# environment variable rather than a file in the repo so it cannot be committed
+# by accident, and the banner below means nobody ships one without seeing it.
+SRC=butane.yaml
+if [ -n "${ARCIO_DEV_SSH_KEY:-}" ]; then
+  printf '\033[0;33m!\033[0m %s\n' "Injecting a development SSH key. DO NOT SHIP THIS IMAGE."
+  SRC="${BUILD}/butane-dev.yaml"
+  awk -v key="${ARCIO_DEV_SSH_KEY}" '
+    /^      groups:$/ && !done { print "      ssh_authorized_keys:"; print "        - " key; done=1 }
+    { print }
+  ' butane.yaml > "${SRC}"
+  grep -q 'ssh_authorized_keys' "${SRC}" || { echo "failed to inject the key" >&2; exit 1; }
+fi
+
 say "Transpiling..."
-butane --strict --files-dir . butane.yaml -o "${BUILD}/config.ign"
+butane --strict --files-dir . "${SRC}" -o "${BUILD}/config.ign"
 
 ok "${BUILD}/config.ign ($(wc -c < "${BUILD}/config.ign") bytes)"
 echo

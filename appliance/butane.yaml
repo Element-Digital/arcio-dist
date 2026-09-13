@@ -94,7 +94,12 @@ storage:
           set -euo pipefail
 
           STAMP=/var/lib/arcio/.firstboot
-          [ -f "${STAMP}" ] && exit 0
+          # An explicit if, not `[ -f x ] && exit 0`. Under `set -e` that
+          # idiom's behaviour depends on where it sits in the script, which is
+          # not a thing to have to reason about at four in the morning.
+          if [ -f "${STAMP}" ]; then
+            exit 0
+          fi
 
           # ── the compose plugin ────────────────────────────────────────────
           #
@@ -136,7 +141,15 @@ storage:
           # A password for the console account. Not baked in, because every
           # appliance would then ship with the same one, and it is extractable
           # by anyone who runs `qemu-img` over the file.
-          PASS="$(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | head -c 20)"
+          #
+          # `cut`, not a second `head`. `... | tr ... | head -c 20` makes head
+          # close the pipe early, tr dies of SIGPIPE with status 141, and
+          # pipefail turns that into a failed unit. cut reads to EOF, so tr
+          # finishes on its own terms.
+          #
+          # The alphabet omits I, L, O, U, 0 and 1 for the same reason the
+          # support reference does: somebody reads this down a phone line.
+          PASS="$(head -c 512 /dev/urandom | tr -dc 'A-HJ-NP-Za-km-z2-9' | cut -c1-20)"
           echo "core:${PASS}" | chpasswd
           printf '%s\n' "${PASS}" > /var/lib/arcio/console-password
           chmod 600 /var/lib/arcio/console-password
