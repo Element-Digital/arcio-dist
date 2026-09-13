@@ -11,7 +11,17 @@ version: 1.1.0
 #
 # It is a stock Flatcar LTS turned into an Arcio appliance by configuration
 # only. There is no custom OS image, no package manager, and nothing compiled
-# here. Everything below is a file, a unit or a sysext.
+# here. Everything below is a file or a unit.
+#
+# ── Configuration here, payload in the image ────────────────────────────────
+#
+# Nothing large goes in this file. Ignition is delivered through fw_cfg or the
+# OEM partition and neither is a bulk transport: a 14 MB compose sysext inlined
+# as base64 produced a 14.7 MB config and hung ignition-fetch-offline
+# indefinitely, with no timeout and no progress. Measured, not guessed.
+#
+# So the split is: this file carries files, units and users. The image build
+# (M2) carries anything measured in megabytes.
 #
 # ── Facts this is written against ───────────────────────────────────────────
 #
@@ -73,18 +83,6 @@ storage:
       contents:
         local: build/arcioctl
 
-    # ── the compose plugin, as a sysext ─────────────────────────────────────
-    #
-    # The Flatcar-native way to add software: an immutable squashfs merged into
-    # /usr at boot, which survives OS updates and leaves /usr read-only. The
-    # alternative was dropping a binary into a plugin directory under /root,
-    # which works and then quietly stops working the first time anything runs
-    # as a different user.
-    - path: /etc/extensions/docker-compose.raw
-      mode: 0644
-      contents:
-        local: build/docker-compose.raw
-
     # ── first boot ──────────────────────────────────────────────────────────
     - path: /opt/bin/arcio-firstboot
       mode: 0755
@@ -97,6 +95,43 @@ storage:
 
           STAMP=/var/lib/arcio/.firstboot
           [ -f "${STAMP}" ] && exit 0
+
+          # ── the compose plugin ────────────────────────────────────────────
+          #
+          # Flatcar ships Docker but not `docker compose`, and delivers Docker
+          # itself as a systemd-sysext, so compose arrives the same way: an
+          # immutable squashfs merged into /usr at boot, surviving OS updates
+          # and leaving /usr read-only.
+          #
+          # The shipped appliance has this baked into the image and this block
+          # does nothing. It exists for the development path, where the config
+          # is handed to the hypervisor rather than baked, because the sysext
+          # cannot travel inside the Ignition config.
+          #
+          # It was tried. Inlining the 14 MB squashfs as base64 produced a
+          # 14.7 MB config.ign, and fw_cfg delivery of that hung
+          # ignition-fetch-offline indefinitely: four minutes in, no progress,
+          # no timeout. Ignition carries configuration. Payload goes in the
+          # image.
+          COMPOSE_SYSEXT_VERSION=5.5.1
+          if [ ! -f /etc/extensions/docker-compose.raw ]; then
+            base="https://github.com/flatcar/sysext-bakery/releases/download/docker-compose-${COMPOSE_SYSEXT_VERSION}"
+            tmp="$(mktemp -d)"
+            if curl -fsSL -o "${tmp}/x.raw" "${base}/docker-compose-${COMPOSE_SYSEXT_VERSION}-x86-64.raw" \
+               && curl -fsSL -o "${tmp}/SHA256SUMS" "${base}/SHA256SUMS"; then
+              want="$(grep "docker-compose-${COMPOSE_SYSEXT_VERSION}-x86-64.raw" "${tmp}/SHA256SUMS" | awk '{print $1}')"
+              got="$(sha256sum "${tmp}/x.raw" | awk '{print $1}')"
+              # Verified before it is installed. This blob is merged into /usr
+              # on every boot, so it is as privileged as anything on the box.
+              if [ -n "${want}" ] && [ "${want}" = "${got}" ]; then
+                install -m 0644 "${tmp}/x.raw" /etc/extensions/docker-compose.raw
+                systemd-sysext refresh
+              else
+                echo "compose sysext checksum mismatch, not installing" >&2
+              fi
+            fi
+            rm -rf "${tmp}"
+          fi
 
           # A password for the console account. Not baked in, because every
           # appliance would then ship with the same one, and it is extractable
