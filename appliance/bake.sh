@@ -24,21 +24,22 @@ set -euo pipefail
 # 14.7MB config and hung ignition-fetch-offline indefinitely. First boot copies
 # it from here to /etc/extensions.
 #
-# ── This is not yet an offline image ────────────────────────────────────────
+# ── Offline ─────────────────────────────────────────────────────────────────
 #
-# Baking the sysext removes one network dependency from first boot. It does not
-# remove them all: `docker compose up -d` still pulls about half a gigabyte of
-# application and PostgreSQL images from ghcr.io, so a genuinely air-gapped
-# appliance needs those pre-loaded into the Docker storage as well.
+# If ./bundle.sh has been run, build/images.tar.gz is written to the ROOT
+# partition as well and first boot loads it. That is what removes the last
+# network dependency: without it, compose pulls about a gigabyte from ghcr.io.
 #
-# That is the offline bundle, and it is not built. Do not describe this image as
-# air-gapped until it is.
+# The bundle is optional and the script says so loudly when it is absent,
+# because an image that quietly needs a registry is the one that gets handed to
+# an air-gapped customer.
 
 cd "$(dirname "$0")"
 
 SRC="${1:-}"
 BUILD=build
 OEM_MNT="${OEM_MNT:-/mnt/arcio-oem}"
+ROOT_MNT="${ROOT_MNT:-/mnt/arcio-root}"
 
 [ -n "${SRC}" ] || { echo "usage: sudo ./bake.sh <flatcar image>" >&2; exit 1; }
 [ -f "${SRC}" ] || { echo "no such image: ${SRC}" >&2; exit 1; }
@@ -57,6 +58,7 @@ RAW="${BUILD}/work.raw"
 LOOP=""
 cleanup() {
   mountpoint -q "${OEM_MNT}" && umount "${OEM_MNT}" || true
+  mountpoint -q "${ROOT_MNT}" && umount "${ROOT_MNT}" || true
   [ -n "${LOOP}" ] && losetup -d "${LOOP}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -103,6 +105,34 @@ fi
 
 sync
 umount "${OEM_MNT}"
+
+# ── the offline image bundle ────────────────────────────────────────────────
+#
+# On the ROOT partition, not OEM: OEM is 128MB and the bundle is around 400MB.
+#
+# Optional. Without it the appliance boots and pulls from ghcr.io like any
+# other install, which is fine for a site with egress and useless for one
+# without. With it, first boot loads the images locally and needs no registry
+# at all.
+if [ -f "${BUILD}/images.tar.gz" ]; then
+  ROOT_LABEL="$(blkid -s PARTLABEL -o value "${LOOP}p9")"
+  [ "${ROOT_LABEL}" = "ROOT" ] || { echo "p9 is '${ROOT_LABEL}', not ROOT." >&2; exit 1; }
+
+  mkdir -p "${ROOT_MNT}"
+  mount "${LOOP}p9" "${ROOT_MNT}"
+
+  # /opt/arcio is created by Ignition on first boot, which happens after this,
+  # so the directory has to exist here for the file to land in it.
+  mkdir -p "${ROOT_MNT}/opt/arcio"
+  say "Writing the offline image bundle ($(du -h "${BUILD}/images.tar.gz" | cut -f1))..."
+  install -m 0644 "${BUILD}/images.tar.gz" "${ROOT_MNT}/opt/arcio/images.tar.gz"
+  sync
+  umount "${ROOT_MNT}"
+else
+  printf '\033[0;33m!\033[0m %s\n' "No images.tar.gz. This image will pull from ghcr.io on first boot."
+  printf '  %s\n' "Run ./bundle.sh first if you need an offline appliance."
+fi
+
 losetup -d "${LOOP}"; LOOP=""
 
 say "Compressing to qcow2..."

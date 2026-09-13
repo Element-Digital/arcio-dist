@@ -252,14 +252,52 @@ systemd:
         [Install]
         WantedBy=multi-user.target
 
+    # ── the offline image bundle ────────────────────────────────────────────
+    #
+    # Its own unit rather than part of arcio-firstboot, and the ordering is the
+    # reason. firstboot installs the compose sysext, which re-merges /usr, and
+    # Docker is itself delivered as a sysext living in /usr. Making firstboot
+    # depend on a running dockerd would mean remerging /usr underneath the
+    # daemon that is running from it.
+    #
+    # So: firstboot does the things that need no daemon, this runs after Docker
+    # is up, and arcio.service waits for both.
+    - name: arcio-load-images.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Load the offline image bundle
+        After=docker.service arcio-firstboot.service
+        Requires=docker.service
+        Before=arcio.service
+        ConditionPathExists=/opt/arcio/images.tar.gz
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        # Unpacking a gigabyte is not a 90-second job on a slow disk.
+        TimeoutStartSec=0
+        ExecStart=/usr/bin/docker load -i /opt/arcio/images.tar.gz
+        # Deleted on success only. 400MB of duplicate that is already unpacked
+        # into Docker's storage, and keeping it costs a customer disk for the
+        # life of the install to no purpose.
+        ExecStartPost=/usr/bin/rm -f /opt/arcio/images.tar.gz
+        # A corrupt bundle should degrade to pulling, not stop the appliance
+        # booting. If there is no registry either, compose reports that, which
+        # is the more useful error.
+        SuccessExitStatus=0 1
+
+        [Install]
+        WantedBy=multi-user.target
+
     - name: arcio.service
       enabled: true
       contents: |
         [Unit]
         Description=Arcio
-        After=docker.service arcio-firstboot.service
+        After=docker.service arcio-firstboot.service arcio-load-images.service
         Requires=docker.service
-        Wants=arcio-firstboot.service
+        Wants=arcio-firstboot.service arcio-load-images.service
 
         [Service]
         Type=oneshot
