@@ -51,7 +51,13 @@ trap 'rm -rf "${WORK}"' EXIT
 CPUS="${ARCIO_OVA_CPUS:-2}"
 MEM_MB="${ARCIO_OVA_MEM_MB:-4096}"
 
-CAPACITY="$(qemu-img info --output=json "${SRC}" | grep -oE '"virtual-size": *[0-9]+' | grep -oE '[0-9]+')"
+# The plain output, not --output=json. The JSON nests a `virtual-size` for the
+# *file* inside `children[0].info` and prints it **before** the top-level one
+# for the disk, so a grep for the key takes the file size (948502528) instead of
+# the capacity (42949672960) and writes a two-line value into an XML attribute.
+# There is no jq here, and the human-readable line is unambiguous.
+CAPACITY="$(qemu-img info "${SRC}" | sed -n 's/^virtual size:.*(\([0-9]\+\) bytes).*/\1/p')"
+[[ "${CAPACITY}" =~ ^[0-9]+$ ]] || { echo "could not read the disk capacity: '${CAPACITY}'" >&2; exit 1; }
 say "Disk capacity: ${CAPACITY} bytes"
 
 # ── VMDK ────────────────────────────────────────────────────────────────────
