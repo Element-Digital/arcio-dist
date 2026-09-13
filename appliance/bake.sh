@@ -22,8 +22,17 @@ set -euo pipefail
 # The sysext is a file on the partition rather than content inside config.ign
 # because Ignition is not a bulk transport: inlining it as base64 produced a
 # 14.7MB config and hung ignition-fetch-offline indefinitely. First boot copies
-# it to /etc/extensions, so a shipped appliance needs no network to finish
-# booting, which is what air-gapped customers require.
+# it from here to /etc/extensions.
+#
+# ── This is not yet an offline image ────────────────────────────────────────
+#
+# Baking the sysext removes one network dependency from first boot. It does not
+# remove them all: `docker compose up -d` still pulls about half a gigabyte of
+# application and PostgreSQL images from ghcr.io, so a genuinely air-gapped
+# appliance needs those pre-loaded into the Docker storage as well.
+#
+# That is the offline bundle, and it is not built. Do not describe this image as
+# air-gapped until it is.
 
 cd "$(dirname "$0")"
 

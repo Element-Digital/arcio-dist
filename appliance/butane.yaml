@@ -120,9 +120,10 @@ storage:
           # image.
           COMPOSE_SYSEXT_VERSION=5.5.1
           if [ ! -f /etc/extensions/docker-compose.raw ] && [ -f /oem/docker-compose.raw ]; then
-            # The shipped appliance: bake.sh put it on the OEM partition, which
-            # is the partition that exists to be customised. Nothing is
-            # fetched, so a first boot needs no network at all.
+            # The shipped appliance: bake.sh put it on the OEM partition,
+            # which is the partition that exists to be customised. One fewer
+            # network dependency at first boot, though not zero: compose still
+            # pulls the application images. See bake.sh.
             install -m 0644 /oem/docker-compose.raw /etc/extensions/docker-compose.raw
             systemd-sysext refresh
           fi
