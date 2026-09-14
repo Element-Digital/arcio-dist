@@ -209,8 +209,45 @@ stops all outbound traffic would never have reached it.
 So `update-engine` and `locksmithd` are **masked**, not merely disabled, since a
 disabled unit can still be pulled in by a dependency. `update.conf` keeps
 `GROUP=lts` and `REBOOT_STRATEGY=off` to decide what happens if somebody
-unmasks them. OS updates are intended to arrive through `arcioctl`, alongside
-application updates, where they are visible and scheduled.
+unmasks them.
+
+That creates an obligation, and `arcioctl` meets it:
+
+```bash
+arcioctl os-status            # version, channel, what is available, is one staged
+sudo arcioctl os-update       # take the current LTS
+sudo arcioctl os-update 4081.3.9
+```
+
+`os-update` backs up first, then drives `flatcar-update`, which runs a temporary
+update service on localhost and writes to the passive partition. Nothing changes
+until you reboot, and if the new version does not come up the bootloader returns
+to the one that did.
+
+It re-masks both units afterwards and rewrites `update.conf`.
+`flatcar-update --disable-afterwards` sets `SERVER=disabled` but leaves
+`update-engine` unmasked and says nothing about `locksmithd`, so without that
+step a single OS update would quietly restore the reboot manager the appliance
+exists without.
+
+Both commands refuse on the Docker install method, where the host is yours.
+
+**Verified end to end**, including the reboot:
+
+```
+before     4081.3.10, both units masked
+os-update  staged 4081.3.9 to the passive partition
+reboot
+after      4081.3.9      both units still masked
+           update.conf   GROUP=lts, REBOOT_STRATEGY=off
+           arcio.service active,  health {"ok":true,"version":"0.10.0"}
+           backup timer  active
+```
+
+That was also the appliance's first reboot of any kind, so it is the first
+evidence that the compose sysext survives one. It does, and it survives an OS
+version change with it: `oem-qemu.raw` re-pointed itself at the 4081.3.9 file
+while `docker-compose.raw` stayed put.
 
 ## Still open
 
@@ -219,6 +256,3 @@ application updates, where they are visible and scheduled.
 - **Publishing.** Images need signing and somewhere to live. Cosign on the blob
   and a GitHub Release is the obvious shape, and `arcioctl import` already
   verifies blob signatures.
-- **OS updates.** The updater ships masked, so something has to take
-  responsibility for OS patching. `arcioctl` is the intended route and does not
-  do it yet.
