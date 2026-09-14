@@ -20,6 +20,9 @@ set -euo pipefail
 #   arcioctl import <bundle>     load a signed offline image bundle
 #   arcioctl diagnostics         write a support bundle to ./diagnostics/
 #   arcioctl logs [service]      follow
+#
+#   arcioctl os-status           appliance only: OS version, is one staged
+#   arcioctl os-update [version] appliance only: take an OS update, then reboot
 
 PROJECT_DIR="${ARCIO_DIR:-/opt/arcio}"
 BACKUP_DIR="${ARCIO_BACKUP_DIR:-${PROJECT_DIR}/backups}"
@@ -205,8 +208,121 @@ cmd_diagnostics() {
   echo "Read it before you send it. Attach it to your support ticket."
 }
 
+# ── the operating system, on the appliance only ─────────────────────────────
+#
+# Arcio OS ships with Flatcar's updater masked. Stock Flatcar checks for an OS
+# update about two minutes after boot and lets locksmithd reboot to apply it,
+# which on an appliance means an outbound connection nobody put on the egress
+# list and an unannounced reboot of the architecture repository.
+#
+# Masking it removes that, and creates an obligation: something has to patch the
+# OS, deliberately, when an administrator says so. These two commands are that
+# something.
+#
+# On the Docker install method the host is yours and you patch it the way you
+# patch everything else, so they refuse rather than guess.
+
+is_flatcar() { [ -f /etc/os-release ] && grep -q '^ID=flatcar' /etc/os-release; }
+
+require_flatcar() {
+  is_flatcar && return 0
+  die "This is for the Arcio OS appliance. On the Docker install method the host is yours to patch."
+}
+
+# The channel the appliance follows. LTS, because an enterprise appliance should
+# not be on a stream that moves every few weeks.
+os_channel() { grep -m1 '^GROUP=' /etc/flatcar/update.conf 2>/dev/null | cut -d= -f2 || echo lts; }
+os_version() { grep -m1 '^VERSION=' /etc/os-release | cut -d= -f2; }
+
+cmd_os_status() {
+  require_flatcar
+  local channel current latest
+  channel="$(os_channel)"
+  current="$(os_version)"
+  echo "Running:  ${current} (${channel})"
+
+  # A staged update has been written to the passive partition and takes effect
+  # on the next boot. Worth saying out loud, because the box is not running what
+  # it is about to run.
+  if [ -f /var/lib/arcio/.os-update-staged ]; then
+    printf '\033[0;33m!\033[0m %s\n' "An update is staged. Reboot to apply it."
+  fi
+
+  # Deliberately last, and allowed to fail. An air-gapped appliance should still
+  # get the useful half of this command.
+  latest="$(curl -fsSL --max-time 10 \
+    "https://${channel}.release.flatcar-linux.net/amd64-usr/current/version.txt" 2>/dev/null \
+    | grep -m1 '^FLATCAR_VERSION=' | cut -d= -f2 || true)"
+  if [ -z "${latest}" ]; then
+    echo "Latest:   could not reach the release server"
+  elif [ "${latest}" = "${current}" ]; then
+    ok "Latest:   ${latest} — up to date"
+  else
+    printf '\033[0;33m!\033[0m %s\n' "Latest:   ${latest} — run: arcioctl os-update"
+  fi
+}
+
+cmd_os_update() {
+  require_flatcar
+  [ "$(id -u)" = "0" ] || die "Needs root: sudo arcioctl os-update"
+
+  local channel current target
+  channel="$(os_channel)"
+  current="$(os_version)"
+  target="${1:-}"
+
+  if [ -z "${target}" ]; then
+    say "Asking ${channel}.release.flatcar-linux.net what is current..."
+    target="$(curl -fsSL --max-time 20 \
+      "https://${channel}.release.flatcar-linux.net/amd64-usr/current/version.txt" \
+      | grep -m1 '^FLATCAR_VERSION=' | cut -d= -f2)" \
+      || die "Could not reach the release server. Pass a version to update offline."
+  fi
+
+  [ "${target}" != "${current}" ] || { ok "Already on ${current}."; return 0; }
+
+  say "Updating the OS: ${current} -> ${target}"
+  echo "  This downloads to the passive partition. Nothing changes until you reboot,"
+  echo "  and if the new version does not boot, the bootloader falls back."
+  echo
+
+  # Back up first, for the same reason `arcioctl update` does: the cheapest
+  # moment to have a backup is before anything changes, and an OS update that
+  # goes wrong is a worse afternoon than an application one.
+  say "Taking a backup first..."
+  cmd_backup >/dev/null
+
+  # flatcar-update runs a temporary update service on localhost and unmasks
+  # update-engine to talk to it. -A writes SERVER=disabled when it finishes, so
+  # the automatic check does not quietly come back with it.
+  say "Downloading and writing to the passive partition..."
+  flatcar-update --to-version "${target}" --disable-afterwards
+
+  # -A disables the server but leaves update-engine unmasked and says nothing
+  # about locksmithd, so put both back the way the appliance ships. Otherwise
+  # one OS update silently re-enables the reboot manager we removed.
+  say "Re-masking the automatic updater..."
+  systemctl mask --now update-engine.service locksmithd.service >/dev/null 2>&1 || true
+
+  # -A overwrites the file, taking GROUP and REBOOT_STRATEGY with it.
+  printf 'GROUP=%s\nREBOOT_STRATEGY=off\n' "${channel}" > /etc/flatcar/update.conf
+
+  mkdir -p /var/lib/arcio
+  touch /var/lib/arcio/.os-update-staged
+
+  ok "Staged ${target}."
+  echo
+  echo "  Reboot when you are ready. Arcio comes back on its own:"
+  echo "    sudo systemctl reboot"
+  echo
+  echo "  The old version stays on the other partition. If the new one does not"
+  echo "  come up, the bootloader returns to it without you doing anything."
+}
+
 case "${1:-}" in
   status)  shift; cmd_status "$@" ;;
+  os-status) shift; cmd_os_status "$@" ;;
+  os-update) shift; cmd_os_update "$@" ;;
   diagnostics) shift; cmd_diagnostics "$@" ;;
   backup)  shift; cmd_backup "$@" >/dev/null && ok "Done" ;;
   restore) shift; cmd_restore "$@" ;;
@@ -214,7 +330,7 @@ case "${1:-}" in
   import)  shift; cmd_import "$@" ;;
   logs)    shift; compose logs -f "${1:-arcio}" ;;
   *)
-    sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac
