@@ -3,6 +3,11 @@
 Stock Flatcar Container Linux turned into an Arcio appliance by configuration
 only. No custom OS image, no package manager, nothing compiled.
 
+**These are build inputs, not a download.** If you want to run Arcio today, use
+the [Docker install method](https://arcio.au/docs/install/docker/). This
+directory is here so the appliance can be built and audited by anyone who wants
+to check what goes into it.
+
 ```bash
 ./build.sh --fetch      # transpile butane.yaml into build/config.ign
 ```
@@ -26,9 +31,9 @@ also strips `flatcar.autologin` from the OEM `grub.cfg`.
 That last one is not cosmetic. Flatcar's QEMU image ships autologin, so the
 console comes up as a shell with sudo and no password. On a developer image you
 booted yourself that is convenient; on an appliance somebody imports it is an
-unauthenticated root shell, and it makes the password first boot generates
-purely decorative. Found by screendumping the M1 console and seeing a
-`core@arcio` prompt nobody had logged into.
+unauthenticated root shell, and it makes the password generated on first boot
+purely decorative. Every baked image is checked for it — see the verification
+below.
 
 Verified on a baked image with no `args` on the VM at all:
 

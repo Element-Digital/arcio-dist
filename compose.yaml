@@ -1,6 +1,6 @@
 # Arcio — the Docker install method.
 #
-#   curl -O https://raw.githubusercontent.com/Element-Digital/Arcio/main/compose.yaml
+#   curl -O https://raw.githubusercontent.com/Element-Digital/arcio-dist/main/compose.yaml
 #   docker compose up -d
 #
 # That is the whole installation. Secrets are generated on first run into the

@@ -1,39 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# arcioctl — the supervisor, as a script rather than a daemon.
+# arcioctl — the Arcio supervisor.
 #
-# Home Assistant's Supervisor is a privileged container holding the Docker
-# socket. Ours is not, deliberately: a container with the socket mounted is
-# root-equivalent on the host, and services/updateRunner.ts documents
-# engineering away from exactly that so the network-facing process keeps
-# NoNewPrivileges and holds no privilege. Copying HA's shape would hand that
-# back for nothing we need. See docs/distribution.md.
+# Runs on the HOST — the Arcio OS appliance, or any machine using the Docker
+# install method — and drives `docker compose`. Run `arcioctl` with no
+# arguments for the command list.
 #
-# Runs on the HOST — the Flatcar appliance, or any machine using the Docker
-# install method — and drives `docker compose`.
-#
-#   arcioctl status              what is running, and is it healthy
-#   arcioctl backup              database + data volume, timestamped
-#   arcioctl restore <file>      from a backup archive
-#   arcioctl update [tag]        pull, migrate, verify, roll back on failure
-#   arcioctl import <bundle>     load a signed offline image bundle
-#   arcioctl diagnostics         write a support bundle to ./diagnostics/
-#   arcioctl logs [service]      follow
-#
-#   arcioctl os-status           appliance only: OS version, is one staged
-#   arcioctl os-update [version] appliance only: take an OS update, then reboot
+# It is a script on the host rather than a privileged container holding the
+# Docker socket. A container with that socket mounted is root-equivalent on the
+# host, and nothing here needs that much reach — so the application container
+# keeps NoNewPrivileges and holds no privilege of its own.
 
 PROJECT_DIR="${ARCIO_DIR:-/opt/arcio}"
 BACKUP_DIR="${ARCIO_BACKUP_DIR:-${PROJECT_DIR}/backups}"
 KEEP_BACKUPS="${ARCIO_KEEP_BACKUPS:-14}"
 HEALTH_TIMEOUT="${ARCIO_HEALTH_TIMEOUT:-180}"
 
-cd "${PROJECT_DIR}"
 compose() { docker compose "$@"; }
 say() { printf '\033[0;36m›\033[0m %s\n' "$*"; }
 ok() { printf '\033[0;32m✓\033[0m %s\n' "$*"; }
 die() { printf '\033[0;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+arcioctl — the Arcio supervisor.
+
+Usage:  arcioctl <command> [arguments]
+
+  status               what is running, and whether it is healthy
+  logs [service]       follow the logs, application by default
+  backup               back up the database and data volume, timestamped
+  restore <file>       restore from a backup archive
+  update [tag]         pull, migrate, verify, and roll back if it fails
+  import <bundle>      load a signed offline image bundle
+  diagnostics          write a support bundle to ./diagnostics/
+
+On the Arcio OS appliance:
+
+  os-status            the OS version, and whether an update is staged
+  os-update [version]  take an OS update, then reboot
+
+Documentation:  https://arcio.au/docs/
+USAGE
+}
 
 current_image() { compose config --images 2>/dev/null | grep -m1 'arcio' || true; }
 
@@ -329,7 +339,16 @@ cmd_os_update() {
   echo "  come up, the bootloader returns to it without you doing anything."
 }
 
+# Help before anything else, and before the working directory matters.
 case "${1:-}" in
+  ""|-h|--help|help) usage; exit 0 ;;
+esac
+
+[ -d "${PROJECT_DIR}" ] || die "No Arcio installation at ${PROJECT_DIR}.
+  Point ARCIO_DIR at yours, or follow https://arcio.au/docs/install/docker/"
+cd "${PROJECT_DIR}"
+
+case "${1}" in
   status)  shift; cmd_status "$@" ;;
   os-status) shift; cmd_os_status "$@" ;;
   os-update) shift; cmd_os_update "$@" ;;
@@ -340,7 +359,8 @@ case "${1:-}" in
   import)  shift; cmd_import "$@" ;;
   logs)    shift; compose logs -f "${1:-arcio}" ;;
   *)
-    sed -n '4,25p' "$0" | sed 's/^# \{0,1\}//'
+    printf '\033[0;31m✗\033[0m Unknown command: %s\n\n' "${1}" >&2
+    usage >&2
     exit 1
     ;;
 esac
