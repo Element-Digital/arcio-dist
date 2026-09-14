@@ -1,3 +1,12 @@
+<p align="center">
+  <a href="https://arcio.au">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="brand/arcio-lockup-dark-bg.png">
+      <img src="brand/arcio-lockup-light-bg.png" alt="Arcio" width="264">
+    </picture>
+  </a>
+</p>
+
 # arcio-dist
 
 Everything you need to run [Arcio](https://arcio.au) that is not the container
@@ -40,6 +49,14 @@ tag and you know exactly what you ran, and can see later what changed.
 
 It is also where appliance images are published, which a couple of files on a
 website could not do.
+
+## Brand
+
+The lockups in `brand/` are generated from the Arcio website repository by its
+`npm run brand`, which draws them from one source of geometry. They are raster
+rather than vector on purpose: the SVG lockups name Manrope and fall back to
+whatever font the viewer happens to have, which is not the brand. Do not edit
+them here.
 
 ## Stability
 
