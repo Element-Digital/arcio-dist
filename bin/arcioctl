@@ -70,7 +70,12 @@ cmd_backup() {
   archive="${BACKUP_DIR}/arcio-${stamp}.tar.gz"
   local work
   work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' RETURN
+  # ${work:-}, not ${work}. A RETURN trap is set on the shell, not scoped to the
+  # function that set it, so it fires again when the *caller* returns. By then
+  # the local is gone and `set -u` kills the script with "work: unbound
+  # variable" after the work has already succeeded. It hit `arcioctl update`
+  # too, which calls this the same way, and surfaced when os-update did.
+  trap 'rm -rf "${work:-}" 2>/dev/null || true' RETURN
 
   say "Dumping the database..."
   compose exec -T db pg_dump -U arcio -d arcio --clean --if-exists > "${work}/arcio.sql"
@@ -100,7 +105,12 @@ cmd_restore() {
   [ -f "${archive}" ] || die "Usage: arcioctl restore <archive.tar.gz>"
   local work
   work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' RETURN
+  # ${work:-}, not ${work}. A RETURN trap is set on the shell, not scoped to the
+  # function that set it, so it fires again when the *caller* returns. By then
+  # the local is gone and `set -u` kills the script with "work: unbound
+  # variable" after the work has already succeeded. It hit `arcioctl update`
+  # too, which calls this the same way, and surfaced when os-update did.
+  trap 'rm -rf "${work:-}" 2>/dev/null || true' RETURN
   tar -xzf "${archive}" -C "${work}"
 
   say "Stopping the application (leaving the database up)..."
