@@ -29,7 +29,7 @@ arcioctl — the Arcio supervisor.
 Usage:  arcioctl <command> [arguments]
 
   status               what is running, and whether it is healthy
-  logs [service]       follow the logs, application by default
+  logs [service]       the logs, application by default; follows on a terminal
   backup               back up the database and data volume, timestamped
   restore <file>       restore from a backup archive
   update [tag]         pull, migrate, verify, and roll back if it fails
@@ -357,7 +357,17 @@ case "${1}" in
   restore) shift; cmd_restore "$@" ;;
   update)  shift; cmd_update "$@" ;;
   import)  shift; cmd_import "$@" ;;
-  logs)    shift; compose logs -f "${1:-arcio}" ;;
+  # Follow only when somebody is watching. The appliance's own console banner
+  # says to run `arcioctl logs | grep -i password` to find the administrator
+  # password, and with an unconditional -f that command prints the password and
+  # then hangs for ever: the pipe never closes, grep never exits, and the first
+  # thing a new owner does leaves them at what looks like a frozen terminal.
+  # `[ -t 1 ]` is false in a pipe, a redirect and a `$( )`, which is exactly the
+  # set of cases where following is wrong anyway.
+  logs)
+    shift
+    if [ -t 1 ]; then compose logs -f "${1:-arcio}"; else compose logs "${1:-arcio}"; fi
+    ;;
   *)
     printf '\033[0;31m✗\033[0m Unknown command: %s\n\n' "${1}" >&2
     usage >&2
