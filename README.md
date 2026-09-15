@@ -9,9 +9,7 @@
 
 # arcio-dist
 
-Everything you need to run [Arcio](https://arcio.au) that is not the container
-image itself. Public, because you cannot ask somebody to evaluate a product
-whose install instructions are behind a credential.
+Everything you need to run [Arcio](https://arcio.au) is here.
 
 ```bash
 curl -O https://raw.githubusercontent.com/Element-Digital/arcio-dist/main/compose.yaml
@@ -32,31 +30,28 @@ Full instructions: **<https://arcio.au/docs/install/docker/>**
 
 **The source.** Arcio is not open source. Licensed customers can read it, so it
 can be reviewed and scanned before it goes near production, but it is not
-published here. The image is the product; the source is the evidence.
+published here.
 
 Every published image is signed with Cosign and carries an SBOM and build
 provenance, so you can verify what you are running without reading it. See
 [Verify what you pulled](https://arcio.au/docs/verify/).
 
-**The images.** They are on `ghcr.io/element-digital/arcio`, public and needing
-no credential.
+**The images.** They are on `ghcr.io/element-digital/arcio`, public and needs
+no credentials.
 
 ## Why a repository
 
 Install files belong somewhere you can pin, diff and verify, rather than on a
-page that can change under you. Everything here is versioned: install from a
-tag and you know exactly what you ran, and can see later what changed.
+page that can change. Everything here is versioned: install from a
+specific version and you know exactly what you ran.
 
 It is also where appliance images are published, which a couple of files on a
 website could not do.
 
 ## Brand
 
-The lockups in `brand/` are generated from the Arcio website repository by its
-`npm run brand`, which draws them from one source of geometry. They are raster
-rather than vector on purpose: the SVG lockups name Manrope and fall back to
-whatever font the viewer happens to have, which is not the brand. Do not edit
-them here.
+The assets in `brand/` are generated from the Arcio website. They are raster
+rather than vector on purpose.
 
 ## Stability
 
