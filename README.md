@@ -13,10 +13,20 @@ Everything you need to run [Arcio](https://arcio.au) is here.
 
 ```bash
 curl -O https://raw.githubusercontent.com/Element-Digital/arcio-dist/main/compose.yaml
-docker compose up -d
+echo "ARCIO_VERSION=edge" > .env
+sudo docker compose up -d
 ```
 
 Full instructions: **<https://arcio.au/docs/install/docker/>**
+
+Two lines in there are not decoration. `ARCIO_VERSION=edge` is needed because
+the compose file defaults to `:stable`, which the first tagged release
+publishes and the private beta has not reached yet; without it the pull fails
+with `manifest unknown`. And `sudo` is needed because a fresh Docker Engine
+gives the socket to root alone. Drop the first when the first release ships.
+Do not drop the second by joining the `docker` group, which hands your account
+root on the host through a side door that the rest of this design spends real
+effort closing.
 
 ## What is in here
 
