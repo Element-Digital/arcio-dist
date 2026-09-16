@@ -3,19 +3,21 @@
 Stock Flatcar Container Linux turned into an Arcio appliance by configuration
 only. No custom OS image, no package manager, nothing compiled.
 
-**These are build inputs, not a download.** If you want to run Arcio today, use
-the [Docker install method](https://arcio.au/docs/install/docker/). This
-directory is here so the appliance can be built and audited by anyone who wants
-to check what goes into it.
+**These are build inputs, not the download.** The images are on
+[the releases page](https://github.com/Element-Digital/arcio-dist/releases/latest),
+and the guide is [Arcio OS](https://arcio.au/docs/install/appliance/). This
+directory is here so the appliance can be rebuilt and audited by anyone who
+wants to check what goes into it.
 
 ```bash
 ./build.sh --fetch      # transpile butane.yaml into build/config.ign
 ```
 
-Status: **a baked qcow2 boots into a working Arcio with nothing supplied by the
-hypervisor, and does it with no route to any registry.** qcow2, OVA and VHDX
-all build. Nothing is published yet. See the
-[roadmap](https://arcio.au/docs/roadmap/).
+Status: **released.** A baked qcow2 boots into a working Arcio with nothing
+supplied by the hypervisor, and does it with no route to any registry. qcow2,
+OVA and VHDX are published, signed, with checksums and SBOMs. The qcow2 is the
+one we boot and run; the other two are structure verified, because Proxmox is
+what we have to test on.
 
 ## Building an image
 

@@ -29,7 +29,7 @@ closing.
 |---|---|
 | `compose.yaml` | The stack: Arcio, PostgreSQL, and an optional Caddy for TLS |
 | `bin/arcioctl` | The supervisor. Backup, restore, update with rollback, diagnostics |
-| `appliance/` | Arcio OS build inputs. Not released yet, see the [roadmap](https://arcio.au/docs/roadmap/) |
+| `appliance/` | Arcio OS build inputs, so the appliance can be rebuilt and audited |
 
 ## What is not
 
@@ -50,8 +50,10 @@ Install files belong somewhere you can pin, diff and verify, rather than on a
 page that can change. Everything here is versioned: install from a
 specific version and you know exactly what you ran.
 
-It is also where appliance images are published, which a couple of files on a
-website could not do.
+It is also where Arcio OS images are published, which a couple of files on a
+website could not do. See
+[the releases](https://github.com/Element-Digital/arcio-dist/releases/latest)
+for the current qcow2, OVA and VHDX, each signed and with an SBOM.
 
 ## Brand
 
@@ -61,8 +63,8 @@ rather than vector on purpose.
 ## Stability
 
 `compose.yaml` and `arcioctl` on `main` track the current release and are what
-the documentation refers to. Anything under `appliance/` is a work in progress
-until the roadmap says otherwise.
+the documentation refers to. `appliance/` holds the build inputs for the
+current Arcio OS release; the images themselves are on the releases page.
 
 If you need a fixed artefact rather than a moving one, use a tagged release
 rather than `main`.
