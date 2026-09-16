@@ -195,8 +195,12 @@ storage:
             Web        ${WEB}
             Console    core / ${PASS}
 
-            The web administrator password is printed in the application log:
-              sudo /opt/bin/arcioctl logs | grep -i password
+            Open the web address to finish setting Arcio up. You choose the
+            administrator account there; nothing has to be read out of a log.
+
+            After the first 30 minutes it asks for a setup code, so that an
+            appliance left running cannot be claimed by a passer-by:
+              sudo /opt/bin/arcioctl status
 
             Write the console password down. It is shown here and stored at
             /var/lib/arcio/console-password, and nowhere else.

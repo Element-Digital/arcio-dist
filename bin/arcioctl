@@ -62,6 +62,33 @@ wait_healthy() {
   return 1
 }
 
+# A fresh install has no administrator, and what its owner needs to know is not
+# a health check. Asked of the app rather than guessed at: /api/setup/status
+# says whether it has been claimed.
+#
+# The code itself is read out of the log, because there is no endpoint that
+# hands it out and there is not going to be one — an unauthenticated endpoint
+# that returns the credential for claiming an unclaimed install would defeat
+# the entire point of having a code.
+setup_notice() {
+  local status code
+  status="$(compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/setup/status 2>/dev/null || true)"
+  case "${status}" in
+    *'"required":true'*) ;;
+    *) return 0 ;;
+  esac
+  echo
+  say "No administrator yet. Finish setup in a browser at this install's address."
+  code="$(compose logs arcio 2>/dev/null \
+    | grep -oE 'Setup code[^:]*: [A-Z0-9-]+' | tail -1 | sed 's/.*: //')"
+  if [ -n "${code}" ]; then
+    printf '  Setup code: %s\n' "${code}"
+    printf '  Only needed once the install is more than 30 minutes old.\n'
+  else
+    printf '  The setup code is in the application log: arcioctl logs | grep -i "setup code"\n'
+  fi
+}
+
 cmd_status() {
   compose ps
   echo
@@ -71,6 +98,7 @@ cmd_status() {
   else
     die "Not answering on /api/health"
   fi
+  setup_notice
 }
 
 cmd_backup() {
