@@ -166,19 +166,45 @@ setup_notice() {
 cmd_status() {
   compose ps
   echo
-  # `/api/ready` reports the database as well as the listener, and says so in
-  # its body, which is what somebody running `status` wants to know. Older
-  # images do not have it; `/api/health` is the honest fallback rather than a
-  # confusing 404.
-  if compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/ready 2>/dev/null; then
-    echo
-    ok "Healthy"
-  elif compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health 2>/dev/null; then
-    echo
-    ok "Healthy (this version has no database check)"
-  else
-    die "Not answering, or not able to reach its database. Try: arcioctl logs"
-  fi
+
+  # Decided on the status code, not on whether curl succeeded.
+  #
+  # The first version of this used `curl -fsS` and fell back to `/api/health`
+  # on any failure, so a 503 from a perfectly modern image — the deep check
+  # running and reporting the database unreachable — fell through to the
+  # shallow endpoint and printed "this version has no database check". It had
+  # the check. The check had failed. Stopping the database and reading the
+  # output is how that was found.
+  #
+  # 404 is the only case that means "this image is older than /api/ready", and
+  # it is the only case that falls back.
+  local out code body
+  out="$(compose exec -T arcio curl -s -w '\n%{http_code}' \
+    http://127.0.0.1:3001/api/ready 2>/dev/null || true)"
+  code="$(printf '%s' "${out}" | tail -1)"
+  body="$(printf '%s' "${out}" | sed '$d')"
+
+  case "${code}" in
+    200)
+      printf '%s\n' "${body}"
+      ok "Healthy"
+      ;;
+    503)
+      printf '%s\n' "${body}"
+      die "Arcio is running but cannot reach its database. Try: arcioctl logs db"
+      ;;
+    404)
+      if compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health 2>/dev/null; then
+        echo
+        ok "Healthy (this version is too old to check the database)"
+      else
+        die "Not answering on /api/health. Try: arcioctl logs"
+      fi
+      ;;
+    *)
+      die "Not answering at all${code:+ (HTTP ${code})}. Try: arcioctl logs"
+      ;;
+  esac
   setup_notice
 }
 
@@ -201,11 +227,20 @@ DATA_VOLUME="${ARCIO_DATA_VOLUME:-arcio_arcio-data}"
 # whether the key in their vault is the one a given dump needs — before a
 # disaster rather than during one. Same derivation as deploy/arcio-backup.sh,
 # or the two would disagree about the same key.
+# Fed in on stdin rather than built into `sh -c`, because the first version was
+# a regex inside a double-quoted string inside a docker argument, and the
+# quoting did not survive the trip. It silently matched nothing and hashed the
+# empty string, which produces e3b0c44298fc1c14 — a fingerprint that looks
+# perfectly valid, is identical on every install that hits the same bug, and
+# would have "matched" a dump it had nothing to do with. Worse than no
+# fingerprint, so now there is no fingerprint when there is no key.
 key_fingerprint() {
-  docker run --rm -v "${DATA_VOLUME}:/data:ro" alpine:3 \
-    sh -c "grep -oE '^FIELD_ENCRYPTION_KEY=\"?[0-9a-fA-F]{64}' /data/secrets.env 2>/dev/null \
-           | grep -oE '[0-9a-fA-F]{64}' | head -1" 2>/dev/null \
-    | tr -d '\n' | sha256sum | cut -c1-16
+  docker run --rm -i -v "${DATA_VOLUME}:/data:ro" alpine:3 sh -s 2>/dev/null <<'FINGERPRINT'
+key=$(sed -n 's/^FIELD_ENCRYPTION_KEY=["'"'"']\{0,1\}\([0-9a-fA-F]\{64\}\).*/\1/p' \
+      /data/secrets.env 2>/dev/null | head -1)
+[ -n "${key}" ] || exit 0
+printf '%s' "${key}" | sha256sum | cut -c1-16
+FINGERPRINT
 }
 
 # Written on success and on failure, because "the last run failed" is the
@@ -237,6 +272,29 @@ JSON
   rm -rf "${work}"
 }
 
+# Report the failure, then stop. Every step below calls this explicitly instead
+# of trusting `set -e`, for the reason in cmd_backup's own comment.
+backup_failed() {
+  local started="$1" archive="$2" reason="$3"
+  write_backup_status false "${started}" "${archive}" 0 0 "${reason}"
+  die "Backup failed: ${reason}"
+}
+
+# ── Why nothing here trusts `set -e` ────────────────────────────────────────
+#
+# It does not apply. `set -e` is suppressed for every command inside a function
+# that is itself part of a `&&` list or a command substitution, and this
+# function is invoked both ways: `cmd_backup ... && ok "Done"` from the command
+# dispatcher, and `safety="$(cmd_backup | tail -1)"` from cmd_update.
+#
+# That is not a theoretical hole. With the database stopped, `docker compose
+# exec` exits 1 and writes nothing; the redirect still created the file, every
+# later step succeeded on an empty dump, and `arcioctl backup` printed a tick
+# over a 925-byte archive containing no database. The pre-update safety backup
+# cmd_update takes could be that file, and the rollback would restore it.
+#
+# So each step is checked by hand, and the result is verified rather than
+# assumed: a backup nobody has read is a hypothesis.
 cmd_backup() {
   mkdir -p "${BACKUP_DIR}"
   local stamp archive started started_ms
@@ -244,11 +302,6 @@ cmd_backup() {
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   started_ms="$(date +%s%3N)"
   archive="${BACKUP_DIR}/arcio-${stamp}.tar.gz"
-
-  # A failure has to be reported, not just raised. `set -e` would otherwise
-  # abort straight out of the function and leave Settings › Backup showing the
-  # previous success, which is the one lie this feature must not tell.
-  trap 'write_backup_status false "'"${started}"'" "'"${archive}"'" 0 0 "backup failed, see the log"' ERR
 
   local work
   work="$(mktemp -d)"
@@ -260,25 +313,41 @@ cmd_backup() {
   trap 'rm -rf "${work:-}" 2>/dev/null || true' RETURN
 
   say "Dumping the database..."
-  compose exec -T db pg_dump -U arcio -d arcio --clean --if-exists > "${work}/arcio.sql"
+  if ! compose exec -T db pg_dump -U arcio -d arcio --clean --if-exists > "${work}/arcio.sql"; then
+    backup_failed "${started}" "${archive}" "pg_dump failed — is the database running?"
+  fi
+
+  # An exit code is not enough on its own. Check the dump says what a dump
+  # says, so that anything which writes zero bytes and claims success is
+  # caught here rather than discovered during a restore.
+  if ! head -c 4096 "${work}/arcio.sql" | grep -q 'PostgreSQL database dump'; then
+    backup_failed "${started}" "${archive}" \
+      "the dump is not a PostgreSQL dump ($(wc -c < "${work}/arcio.sql") bytes)"
+  fi
 
   # The data volume carries secrets.env. A dump without FIELD_ENCRYPTION_KEY
   # restores every table and decrypts none of the credentials in them, which is
   # a restore that looks like it worked — so the two travel together.
   say "Copying the data volume..."
-  docker run --rm -v "${DATA_VOLUME}:/data:ro" -v "${work}:/out" alpine:3 \
-    tar -czf /out/data.tar.gz -C /data . 2>/dev/null
+  if ! docker run --rm -v "${DATA_VOLUME}:/data:ro" -v "${work}:/out" alpine:3 \
+       tar -czf /out/data.tar.gz -C /data . 2>/dev/null; then
+    backup_failed "${started}" "${archive}" "could not read the ${DATA_VOLUME} volume"
+  fi
 
-  tar -czf "${archive}" -C "${work}" arcio.sql data.tar.gz
+  if ! tar -czf "${archive}" -C "${work}" arcio.sql data.tar.gz; then
+    backup_failed "${started}" "${archive}" "could not write ${archive}"
+  fi
   chmod 600 "${archive}"
 
   # Verify rather than assume. A backup nobody has read is a hypothesis.
-  tar -tzf "${archive}" >/dev/null || die "Archive did not verify: ${archive}"
+  if ! tar -tzf "${archive}" >/dev/null 2>&1; then
+    backup_failed "${started}" "${archive}" "the archive did not verify"
+  fi
 
   ls -1t "${BACKUP_DIR}"/arcio-*.tar.gz 2>/dev/null | tail -n "+$((KEEP_BACKUPS + 1))" \
     | xargs -r rm -f
 
-  trap - ERR
+
   write_backup_status true "${started}" "${archive}" \
     "$(stat -c %s "${archive}")" "$(( $(date +%s%3N) - started_ms ))" ""
 
@@ -536,7 +605,10 @@ case "${1}" in
   os-status) shift; cmd_os_status "$@" ;;
   os-update) shift; cmd_os_update "$@" ;;
   diagnostics) shift; cmd_diagnostics "$@" ;;
-  backup)  shift; cmd_backup "$@" >/dev/null && ok "Done" ;;
+  # Not `&& ok "Done"`: a command on the left of `&&` runs with errexit
+  # suppressed throughout, which is half of why a failed dump used to report
+  # success. cmd_backup checks itself now, and this no longer disarms it.
+  backup)  shift; cmd_backup "$@" >/dev/null; ok "Done" ;;
   restore) shift; cmd_restore "$@" ;;
   update)  shift; cmd_update "$@" ;;
   import)  shift; cmd_import "$@" ;;
