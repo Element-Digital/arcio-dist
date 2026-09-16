@@ -23,6 +23,9 @@ cd "$(dirname "$0")"
 FLATCAR_CHANNEL="${FLATCAR_CHANNEL:-lts}"
 COMPOSE_SYSEXT_VERSION="${COMPOSE_SYSEXT_VERSION:-5.5.1}"
 ARCH="${ARCH:-x86-64}"
+# The sysext bakery says `x86-64`; the Flatcar release server says `amd64-usr`.
+# Same architecture, two spellings, and the build needs both.
+ARCH_ALT="${ARCH_ALT:-amd64-usr}"
 
 BUILD=build
 mkdir -p "${BUILD}"
@@ -52,6 +55,17 @@ if [ "${1:-}" = "--fetch" ] || [ ! -f "${BUILD}/docker-compose.raw" ]; then
        | sed "s|docker-compose-${COMPOSE_SYSEXT_VERSION}-${ARCH}.raw|docker-compose.raw|" \
        | sha256sum -c - )
   ok "sysext verified"
+
+  # The OS version the artefact is named after. bake.sh reads this, and it used
+  # to be a file somebody had left in the working directory from a previous
+  # session — so a fresh clone baked `arcio-os-unknown.qcow2` and nothing said
+  # why. An undeclared input is not an input, it is a thing that works on one
+  # machine. Fetched from the channel here, beside everything else the build
+  # needs.
+  say "Fetching the ${FLATCAR_CHANNEL} version..."
+  curl -fsSL -o version.txt \
+    "https://${FLATCAR_CHANNEL}.release.flatcar-linux.net/${ARCH_ALT}/current/version.txt"
+  ok "Flatcar $(grep -m1 '^FLATCAR_VERSION=' version.txt | cut -d= -f2)"
 fi
 
 # compose.yaml and arcioctl come from this repo, one directory up. The
