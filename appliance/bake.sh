@@ -165,7 +165,11 @@ say "Compressing to qcow2..."
 qemu-img convert -O qcow2 -c "${RAW}" "${OUT}"
 rm -f "${RAW}"
 
-sha256sum "${OUT}" | tee "${OUT}.sha256"
+# Recorded against the bare filename, not `build/<name>`. A customer downloads
+# one file and runs `sha256sum -c` beside it; a path prefix from our build tree
+# makes that fail with "No such file or directory" on a download that is
+# perfectly intact, which is the worst possible answer from an integrity check.
+( cd "$(dirname "${OUT}")" && sha256sum "$(basename "${OUT}")" ) | tee "${OUT}.sha256"
 ok "${OUT} ($(du -h "${OUT}" | cut -f1))"
 echo
 echo "Import on Proxmox with:"

@@ -124,25 +124,49 @@ storage:
             WEB="no address. This appliance got none from DHCP; set one and reboot"
           fi
 
-          # Asked of the application rather than assumed, so a claimed
-          # appliance stops telling people to go and set it up.
-          SETUP=""
-          if curl -fsS --max-time 3 http://127.0.0.1:3001/api/setup/status 2>/dev/null \
-             | grep -q '"required":true'; then
-            SETUP=$'\n    Open the web address to finish setting Arcio up. You choose the\n    administrator account there; nothing has to be read out of a log.\n\n    After the first 30 minutes it asks for a setup code:\n      sudo /opt/bin/arcioctl status\n'
-          fi
-
-          mkdir -p /etc/issue.d
-          cat > /etc/issue.d/10-arcio.issue <<EOF
+          write_banner() {
+            mkdir -p /etc/issue.d
+            cat > /etc/issue.d/10-arcio.issue <<EOF
 
               Arcio appliance
 
               Web        ${WEB}
               Console    core / ${PASS}
-          ${SETUP}
+          ${1}
               The console password is also at /var/lib/arcio/console-password.
 
           EOF
+          }
+
+          # Draw the address and the password straight away. They are true
+          # before the application has started and they are what somebody
+          # watching the console boot is waiting for.
+          write_banner ""
+
+          # Then wait for Arcio, and redraw with what it says.
+          #
+          # `After=arcio.service` is not enough on its own: that unit runs
+          # `docker compose up -d`, which returns when containers have been
+          # *started*, not when the application answers. First boot then loads
+          # a gigabyte of images, applies migrations and seeds, so the first
+          # version of this asked an API that was not listening yet, silently
+          # got nothing, and left the console with no setup instructions on it
+          # — which is the one moment they matter most.
+          SETUP_TEXT=$'\n    Open the web address to finish setting Arcio up. You choose the\n    administrator account there; nothing has to be read out of a log.\n\n    After the first 30 minutes it asks for a setup code:\n      sudo /opt/bin/arcioctl status\n'
+          STATUS=""
+          for _ in $(seq 1 80); do
+            STATUS="$(curl -fsS --max-time 3 http://127.0.0.1:3001/api/setup/status 2>/dev/null || true)"
+            if [ -n "${STATUS}" ]; then
+              break
+            fi
+            sleep 3
+          done
+
+          # Asked of the application rather than assumed, so an appliance
+          # somebody set up months ago stops telling them to go and set it up.
+          case "${STATUS}" in
+            *'"required":true'*) write_banner "${SETUP_TEXT}" ;;
+          esac
 
     # ── first boot ──────────────────────────────────────────────────────────
     - path: /opt/bin/arcio-firstboot
@@ -386,6 +410,12 @@ systemd:
         [Service]
         Type=oneshot
         RemainAfterExit=yes
+        # The script waits up to four minutes for Arcio to start answering
+        # before it redraws with the setup instructions, and systemd's default
+        # of 90 seconds would kill it partway through on exactly the slow first
+        # boot that needs the wait. Nothing depends on this unit, so a long
+        # start blocks nobody.
+        TimeoutStartSec=0
         ExecStart=/opt/bin/arcio-banner
 
         [Install]

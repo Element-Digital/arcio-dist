@@ -183,8 +183,11 @@ qemu-img convert -O vhdx "${SRC}" "${BASE}.vhdx"
 
 say "Verifying..."
 qemu-img info "${BASE}.vhdx" >/dev/null
+# Bare filenames, for the reason bake.sh records its own that way: a customer
+# runs `sha256sum -c` beside the one file they downloaded, and a path from our
+# build tree turns an intact download into a failed integrity check.
 for f in "${BASE}.ova" "${BASE}.vhdx"; do
-  sha256sum "${f}" > "${f}.sha256"
+  ( cd "$(dirname "${f}")" && sha256sum "$(basename "${f}")" ) > "${f}.sha256"
 done
 
 echo
