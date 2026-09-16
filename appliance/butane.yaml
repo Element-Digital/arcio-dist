@@ -87,6 +87,63 @@ storage:
       contents:
         local: build/arcioctl
 
+    # ── the console banner ──────────────────────────────────────────────────
+    #
+    # Every boot, not once.
+    #
+    # This wrote `/etc/issue` from the first-boot script, and first boot runs
+    # once. Flatcar regenerates `/etc/issue` itself on every boot, so the
+    # **second** boot replaced the Arcio banner with the stock one and the web
+    # address, the console password and the setup instructions were gone for
+    # good. An operator who had not written the password down at first boot had
+    # no way back to the console at all: it is on disk at
+    # /var/lib/arcio/console-password, which you need a console to read.
+    #
+    # A drop-in in `/etc/issue.d` instead, rewritten on every boot. That is the
+    # directory Flatcar's own SSH host key banner uses, so it is read by the
+    # same agetty that was overwriting us, and it survives an OS update the way
+    # a file in /etc/issue does not.
+    - path: /opt/bin/arcio-banner
+      mode: 0755
+      contents:
+        inline: |
+          #!/usr/bin/env bash
+          # What somebody looking at the console needs, and nothing else.
+          set -euo pipefail
+
+          PASS_FILE=/var/lib/arcio/console-password
+          PASS="$(cat "${PASS_FILE}" 2>/dev/null || echo '(see /var/lib/arcio/console-password)')"
+
+          # An empty IP is a real case rather than a defensive flourish: an
+          # appliance booted where there is no DHCP server comes up with no
+          # global address at all, and saying so beats printing `http://:3001`.
+          IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
+          if [ -n "${IP}" ]; then
+            WEB="http://${IP}:3001"
+          else
+            WEB="no address. This appliance got none from DHCP; set one and reboot"
+          fi
+
+          # Asked of the application rather than assumed, so a claimed
+          # appliance stops telling people to go and set it up.
+          SETUP=""
+          if curl -fsS --max-time 3 http://127.0.0.1:3001/api/setup/status 2>/dev/null \
+             | grep -q '"required":true'; then
+            SETUP=$'\n    Open the web address to finish setting Arcio up. You choose the\n    administrator account there; nothing has to be read out of a log.\n\n    After the first 30 minutes it asks for a setup code:\n      sudo /opt/bin/arcioctl status\n'
+          fi
+
+          mkdir -p /etc/issue.d
+          cat > /etc/issue.d/10-arcio.issue <<EOF
+
+              Arcio appliance
+
+              Web        ${WEB}
+              Console    core / ${PASS}
+          ${SETUP}
+              The console password is also at /var/lib/arcio/console-password.
+
+          EOF
+
     # ── first boot ──────────────────────────────────────────────────────────
     - path: /opt/bin/arcio-firstboot
       mode: 0755
@@ -182,34 +239,9 @@ storage:
 
           touch "${STAMP}"
 
-          # An appliance that did not get an address should say so on the
-          # console rather than print a broken URL at somebody.
-          if [ -n "${IP}" ]; then
-            WEB="http://${IP}:3001"
-          else
-            WEB="no address. This appliance got none from DHCP; set one and reboot"
-          fi
-
-          # /etc/issue puts this on the console login screen, which is where
-          # somebody who has just imported an OVA is actually looking.
-          cat > /etc/issue <<EOF
-
-            Arcio appliance
-
-            Web        ${WEB}
-            Console    core / ${PASS}
-
-            Open the web address to finish setting Arcio up. You choose the
-            administrator account there; nothing has to be read out of a log.
-
-            After the first 30 minutes it asks for a setup code, so that an
-            appliance left running cannot be claimed by a passer-by:
-              sudo /opt/bin/arcioctl status
-
-            Write the console password down. It is shown here and stored at
-            /var/lib/arcio/console-password, and nowhere else.
-
-          EOF
+          # Draw it now so the first console somebody opens has it, rather than
+          # waiting for the unit below to catch up.
+          /opt/bin/arcio-banner || true
 
     # ── the OS updater ──────────────────────────────────────────────────────
     #
@@ -332,6 +364,29 @@ systemd:
         TimeoutStartSec=0
         ExecStart=/usr/bin/docker compose up -d --remove-orphans
         ExecStop=/usr/bin/docker compose down
+
+        [Install]
+        WantedBy=multi-user.target
+
+    # The console banner, redrawn on every boot.
+    #
+    # After arcio.service, so the "finish setting this up" half can ask the
+    # application whether it has been claimed rather than guessing. agetty
+    # re-reads /etc/issue.d every time it prints a prompt, so a banner written
+    # after a getty has already started still appears at the next one, and
+    # nothing has to be restarted.
+    - name: arcio-banner.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Arcio console banner
+        After=network-online.target arcio.service
+        Wants=network-online.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/opt/bin/arcio-banner
 
         [Install]
         WantedBy=multi-user.target
