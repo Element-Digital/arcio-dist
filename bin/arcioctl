@@ -21,6 +21,58 @@ compose() { docker compose "$@"; }
 say() { printf '\033[0;36m›\033[0m %s\n' "$*"; }
 ok() { printf '\033[0;32m✓\033[0m %s\n' "$*"; }
 die() { printf '\033[0;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+warn() { printf '\033[0;33m!\033[0m %s\n' "$*" >&2; }
+
+# Both repositories publish signed artefacts: the application images and the
+# offline bundles from Arcio, the appliance images from arcio-dist. Either is a
+# valid signer of something you would `import`.
+COSIGN_IDENTITY_RE='https://github.com/Element-Digital/(Arcio|arcio-dist)/.*'
+COSIGN_ISSUER='https://token.actions.githubusercontent.com'
+
+# Verify a detached signature over a file, keylessly.
+#
+# ── Two things were wrong here ──────────────────────────────────────────────
+#
+# It passed `--signature` and never `--certificate`. Keyless verification needs
+# the certificate to establish who signed; without it cosign does not fail the
+# check, it refuses to run one:
+#
+#   Error: provide a key with --key or --sk, a certificate to verify against
+#   with --certificate, or a bundle with --bundle
+#
+# The `|| die` caught that, so it failed closed rather than loading unverified
+# — but it means `arcioctl import` could never accept a correctly signed
+# bundle. The air-gapped install path did not work, and would not have worked
+# for anybody who tried it.
+#
+# And cosign has since replaced both flags with a single `--bundle`, so even
+# the corrected pair prints a deprecation notice on every run. New artefacts
+# carry a bundle; the pair is still accepted for anything signed before the
+# change, and for an operator running an older cosign.
+verify_blob() {
+  local blob="$1"
+
+  if ! command -v cosign >/dev/null 2>&1; then
+    warn "cosign is not installed, so ${blob} cannot be verified."
+    warn "Install it from https://github.com/sigstore/cosign, or accept the risk knowingly."
+    return 1
+  fi
+
+  local -a material
+  if [ -f "${blob}.bundle" ]; then
+    material=(--bundle "${blob}.bundle")
+  elif [ -f "${blob}.sig" ] && [ -f "${blob}.pem" ]; then
+    material=(--signature "${blob}.sig" --certificate "${blob}.pem")
+  else
+    warn "No ${blob}.bundle, and no ${blob}.sig with ${blob}.pem beside it."
+    return 1
+  fi
+
+  cosign verify-blob "${material[@]}" \
+    --certificate-identity-regexp "${COSIGN_IDENTITY_RE}" \
+    --certificate-oidc-issuer "${COSIGN_ISSUER}" \
+    "${blob}" >/dev/null 2>&1
+}
 
 usage() {
   cat <<'USAGE'
@@ -215,15 +267,22 @@ cmd_import() {
   # Verified before it is loaded, not after. A bundle that arrived on a USB
   # stick has a worse provenance story than a registry pull, so the signature
   # is the only thing standing in for the transport.
-  if command -v cosign >/dev/null 2>&1 && [ -f "${bundle}.sig" ]; then
-    say "Verifying signature..."
-    cosign verify-blob --signature "${bundle}.sig" \
-      --certificate-identity-regexp 'https://github.com/Element-Digital/Arcio/.*' \
-      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-      "${bundle}" || die "Signature did not verify — do not load this bundle."
+  #
+  # Three outcomes, kept distinct on purpose. A signature that does not verify
+  # is a refusal: the bytes are not what was signed and nothing good follows
+  # from loading them. Missing material, or no cosign, is a warning and a
+  # prompt, because an air-gapped operator who has deliberately carried an
+  # unsigned tarball in should not be stopped by a tool that cannot tell the
+  # two situations apart.
+  say "Verifying signature..."
+  if verify_blob "${bundle}"; then
     ok "Signature verified."
+  elif [ -f "${bundle}.bundle" ] || { [ -f "${bundle}.sig" ] && [ -f "${bundle}.pem" ]; }; then
+    die "Signature did not verify — do not load this bundle."
+  elif [ "${ARCIO_IMPORT_UNVERIFIED:-}" = "yes" ]; then
+    warn "Loading ${bundle} without verifying it, because ARCIO_IMPORT_UNVERIFIED=yes."
   else
-    printf '\033[0;33m!\033[0m %s\n' "No cosign or no .sig alongside the bundle — loading unverified." >&2
+    die "Refusing to load an unverified bundle. Set ARCIO_IMPORT_UNVERIFIED=yes to override."
   fi
 
   say "Loading images..."

@@ -171,17 +171,30 @@ jobs:
       # else. The certificate records which workflow, at which commit, signed
       # which bytes, and `arcioctl import` already verifies blob signatures in
       # exactly this shape.
+      # Three files per artefact, and that is deliberate.
+      #
+      # `.bundle` is what cosign wants now: one file carrying the signature,
+      # the certificate and the transparency log entry, and the only form that
+      # does not print a deprecation notice on every verification.
+      #
+      # `.sig` and `.pem` stay beside it because an operator running an older
+      # cosign has no `--bundle`, and the whole point of an offline bundle is
+      # that it reaches somebody who cannot casually upgrade their tooling.
       - name: Sign every artefact
         run: |
           cd appliance/build
           for f in arcio-os-*.qcow2 arcio-os-*.ova arcio-os-*.vhdx sbom-*.spdx.json; do
             cosign sign-blob --yes \
+              --bundle "${f}.bundle" \
               --output-signature "${f}.sig" \
               --output-certificate "${f}.pem" \
               "${f}"
           done
-          ls -lh ./*.sig
+          ls -lh ./*.bundle
 
+      # Both forms, because both are published and a customer may use either.
+      # Verifying only the one we prefer would leave the other untested until
+      # somebody in an air-gapped site found it broken.
       - name: Verify what we just signed
         env:
           REPO: ${{ github.repository }}
@@ -189,13 +202,18 @@ jobs:
           cd appliance/build
           for f in arcio-os-*.qcow2 arcio-os-*.ova arcio-os-*.vhdx; do
             cosign verify-blob \
+              --bundle "${f}.bundle" \
+              --certificate-identity-regexp "https://github.com/${REPO}/.*" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${f}"
+            cosign verify-blob \
               --certificate "${f}.pem" \
               --signature "${f}.sig" \
               --certificate-identity-regexp "https://github.com/${REPO}/.*" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               "${f}"
           done
-          echo "Every artefact verifies."
+          echo "Every artefact verifies, as a bundle and as a certificate pair."
 
       - name: Release notes
         id: notes
@@ -229,12 +247,14 @@ jobs:
             echo "sha256sum -c arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2.sha256"
             echo
             echo "cosign verify-blob \\"
-            echo "  --certificate arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2.pem \\"
-            echo "  --signature arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2.sig \\"
+            echo "  --bundle arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2.bundle \\"
             echo "  --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.*' \\"
             echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
             echo "  arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2"
             echo '```'
+            echo
+            echo "Every artefact also carries a \`.sig\` and a \`.pem\`, for a cosign old"
+            echo "enough not to have \`--bundle\`. Use one form or the other, not both."
             echo
             echo "An SPDX SBOM is attached for each container image inside the appliance."
           } > release-notes.md
@@ -253,8 +273,10 @@ jobs:
             appliance/build/arcio-os-*.ova \
             appliance/build/arcio-os-*.vhdx \
             appliance/build/arcio-os-*.sha256 \
+            appliance/build/arcio-os-*.bundle \
             appliance/build/arcio-os-*.sig \
             appliance/build/arcio-os-*.pem \
             appliance/build/sbom-*.spdx.json \
+            appliance/build/sbom-*.bundle \
             appliance/build/sbom-*.sig \
             appliance/build/sbom-*.pem
