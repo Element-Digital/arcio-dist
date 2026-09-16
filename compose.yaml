@@ -1,7 +1,6 @@
 # Arcio — the Docker install method.
 #
 #   curl -O https://raw.githubusercontent.com/Element-Digital/arcio-dist/main/compose.yaml
-#   echo "ARCIO_VERSION=edge" > .env
 #   sudo docker compose up -d
 #
 # That is the whole installation. Secrets are generated on first run into the
@@ -39,11 +38,6 @@ services:
     # `stable` is the newest release; `edge` is the head of main. There is no
     # `:latest` tag on purpose — in Arcio's own vocabulary "latest" is the
     # every-commit channel, the opposite of what Docker convention means by it.
-    #
-    # `stable` is not published yet: it is written by a `v*` tag build, and the
-    # tags so far predate that workflow. Until the first release is cut with it
-    # in place, set ARCIO_VERSION=edge or the pull fails with `manifest
-    # unknown`. The default stays `stable` because that is what it should be.
     image: ghcr.io/element-digital/arcio:${ARCIO_VERSION:-stable}
     restart: unless-stopped
     depends_on:
