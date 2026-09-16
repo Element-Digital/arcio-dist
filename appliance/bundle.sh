@@ -26,7 +26,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-ARCIO_VERSION="${ARCIO_VERSION:-edge}"
+# `stable` by default: what the appliance pins in its own .env, so the bundle
+# it carries and the tag it would otherwise pull are the same image.
+ARCIO_VERSION="${ARCIO_VERSION:-stable}"
 BUILD=build
 mkdir -p "${BUILD}"
 

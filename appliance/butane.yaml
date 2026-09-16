@@ -75,7 +75,11 @@ storage:
       contents:
         inline: |
           # Pinned by the build. arcioctl update rewrites this line.
-          ARCIO_VERSION=edge
+          #
+          # `stable` is the released channel: the newest `v*` tag, taken
+          # deliberately rather than as it lands. The appliance followed `edge`
+          # through the beta, when there was no tagged release to follow.
+          ARCIO_VERSION=stable
           TZ=UTC
 
     - path: /opt/bin/arcioctl
