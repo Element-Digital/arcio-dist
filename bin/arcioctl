@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# arcioctl — the Arcio supervisor.
+# arcioctl: the Arcio supervisor.
 #
 # Runs on the HOST — the Arcio OS appliance, or any machine using the Docker
 # install method — and drives `docker compose`. Run `arcioctl` with no
@@ -76,7 +76,7 @@ verify_blob() {
 
 usage() {
   cat <<'USAGE'
-arcioctl — the Arcio supervisor.
+arcioctl: the Arcio supervisor.
 
 Usage:  arcioctl <command> [arguments]
 
@@ -314,7 +314,7 @@ cmd_backup() {
 
   say "Dumping the database..."
   if ! compose exec -T db pg_dump -U arcio -d arcio --clean --if-exists > "${work}/arcio.sql"; then
-    backup_failed "${started}" "${archive}" "pg_dump failed — is the database running?"
+    backup_failed "${started}" "${archive}" "pg_dump failed. Is the database running?"
   fi
 
   # An exit code is not enough on its own. Check the dump says what a dump
@@ -418,7 +418,7 @@ cmd_update() {
     return 0
   fi
 
-  printf '\033[0;31m✗\033[0m %s\n' "New version did not become healthy — rolling back." >&2
+  printf '\033[0;31m✗\033[0m %s\n' "New version did not become healthy, rolling back." >&2
   compose logs --tail 50 arcio >&2 || true
   cmd_restore "${safety}"
   die "Rolled back to the pre-update state. The failed version's logs are above."
@@ -443,7 +443,7 @@ cmd_import() {
   if verify_blob "${bundle}"; then
     ok "Signature verified."
   elif [ -f "${bundle}.bundle" ] || { [ -f "${bundle}.sig" ] && [ -f "${bundle}.pem" ]; }; then
-    die "Signature did not verify — do not load this bundle."
+    die "Signature did not verify. Do not load this bundle."
   elif [ "${ARCIO_IMPORT_UNVERIFIED:-}" = "yes" ]; then
     warn "Loading ${bundle} without verifying it, because ARCIO_IMPORT_UNVERIFIED=yes."
   else
@@ -474,7 +474,7 @@ cmd_diagnostics() {
       const b = await m.buildBundle({ days: ${days} });
       process.stdout.write(m.serialiseBundle(b));
     }).catch((e) => { console.error(e); process.exit(1); });
-  " > "${out}" || die "Could not build a bundle — is the application running? arcioctl status"
+  " > "${out}" || die "Could not build a bundle. Is the application running? Try arcioctl status"
   chmod 600 "${out}"
   ok "Bundle: ${out} ($(du -h "${out}" | cut -f1))"
   echo "Read it before you send it. Attach it to your support ticket."
@@ -528,9 +528,9 @@ cmd_os_status() {
   if [ -z "${latest}" ]; then
     echo "Latest:   could not reach the release server"
   elif [ "${latest}" = "${current}" ]; then
-    ok "Latest:   ${latest} — up to date"
+    ok "Latest:   ${latest}, up to date"
   else
-    printf '\033[0;33m!\033[0m %s\n' "Latest:   ${latest} — run: arcioctl os-update"
+    printf '\033[0;33m!\033[0m %s\n' "Latest:   ${latest}, run: arcioctl os-update"
   fi
 }
 
