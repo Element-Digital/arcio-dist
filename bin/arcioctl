@@ -99,15 +99,37 @@ USAGE
 
 current_image() { compose config --images 2>/dev/null | grep -m1 'arcio' || true; }
 
-# Healthy means the app answers, not that the container is running. A container
-# that started and then failed its first query is "up" to Docker and useless to
-# a user, and that is precisely the state an update must not be left in.
+# Healthy means the app can serve a request, not that the container is running.
+#
+# A container that started and then failed its first query is "up" to Docker
+# and useless to a user, and that is precisely the state an update must not be
+# left in. This is the check `cmd_update` rolls back on, so what it accepts
+# decides whether the rollback ever fires.
+#
+# `/api/ready` asks the application whether it can reach its database.
+# `/api/health` only proves the listener is up, which is the right answer for
+# the container's own HEALTHCHECK — Docker restarts on that one, and a database
+# blip should not restart the app — and the wrong answer here.
+#
+# 404 means an image older than /api/ready, which happens on a rollback to a
+# previous version and on any install whose arcioctl is newer than its image.
+# Falling back to /api/health there is strictly better than refusing to
+# recognise a perfectly healthy older release.
 wait_healthy() {
-  local waited=0
+  local waited=0 code
   while [ "${waited}" -lt "${HEALTH_TIMEOUT}" ]; do
-    if compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health >/dev/null 2>&1; then
-      return 0
-    fi
+    code="$(compose exec -T arcio curl -s -o /dev/null -w '%{http_code}' \
+      http://127.0.0.1:3001/api/ready 2>/dev/null || true)"
+    case "${code}" in
+      200)
+        return 0
+        ;;
+      404)
+        if compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health >/dev/null 2>&1; then
+          return 0
+        fi
+        ;;
+    esac
     sleep 3
     waited=$((waited + 3))
   done
@@ -144,20 +166,90 @@ setup_notice() {
 cmd_status() {
   compose ps
   echo
-  if compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health 2>/dev/null; then
+  # `/api/ready` reports the database as well as the listener, and says so in
+  # its body, which is what somebody running `status` wants to know. Older
+  # images do not have it; `/api/health` is the honest fallback rather than a
+  # confusing 404.
+  if compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/ready 2>/dev/null; then
     echo
     ok "Healthy"
+  elif compose exec -T arcio curl -fsS http://127.0.0.1:3001/api/health 2>/dev/null; then
+    echo
+    ok "Healthy (this version has no database check)"
   else
-    die "Not answering on /api/health"
+    die "Not answering, or not able to reach its database. Try: arcioctl logs"
   fi
   setup_notice
 }
 
+# ── reporting a backup back into the product ────────────────────────────────
+#
+# An unmonitored backup is one nobody discovers has been failing for five
+# weeks, which is why Settings › Backup exists. It reads a small JSON status
+# file, and only the old LXC install script ever wrote one — so on the two
+# install methods that are actually supported, Docker and the appliance, the
+# nightly timer ran and the product reported "we cannot tell".
+#
+# The file goes in the data volume because that is the one place the host and
+# the container both reach. The dumps themselves deliberately stay where the
+# application cannot read them: a dump is the whole database, and the
+# network-facing process has no business holding it. A status file is not.
+DATA_VOLUME="${ARCIO_DATA_VOLUME:-arcio_arcio-data}"
+
+# First 16 hex of sha256 over the key. Enough to prove two keys are the same
+# one and useless for reconstructing it, which is what lets an operator tell
+# whether the key in their vault is the one a given dump needs — before a
+# disaster rather than during one. Same derivation as deploy/arcio-backup.sh,
+# or the two would disagree about the same key.
+key_fingerprint() {
+  docker run --rm -v "${DATA_VOLUME}:/data:ro" alpine:3 \
+    sh -c "grep -oE '^FIELD_ENCRYPTION_KEY=\"?[0-9a-fA-F]{64}' /data/secrets.env 2>/dev/null \
+           | grep -oE '[0-9a-fA-F]{64}' | head -1" 2>/dev/null \
+    | tr -d '\n' | sha256sum | cut -c1-16
+}
+
+# Written on success and on failure, because "the last run failed" is the
+# single most important thing this can say and a status file that only appears
+# when things went well cannot say it.
+write_backup_status() {
+  local ok_flag="$1" started="$2" archive="$3" bytes="$4" duration="$5" error="$6"
+  local fp count work
+  count="$(find "${BACKUP_DIR}" -maxdepth 1 -name 'arcio-*.tar.gz' -type f 2>/dev/null | wc -l)"
+  fp="$(key_fingerprint || true)"
+  work="$(mktemp -d)"
+  cat > "${work}/backup-status.json" <<JSON
+{
+  "startedAt": "${started}",
+  "finishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "ok": ${ok_flag},
+  "path": "${archive}",
+  "sizeBytes": ${bytes:-0},
+  "durationMs": ${duration:-0},
+  "keyFingerprint": "${fp}",
+  "keptDays": ${KEEP_BACKUPS},
+  "backupCount": ${count:-0},
+  "error": "${error}"
+}
+JSON
+  docker run --rm -v "${DATA_VOLUME}:/data" -v "${work}:/in:ro" alpine:3 \
+    sh -c 'cp /in/backup-status.json /data/backup-status.json && chmod 644 /data/backup-status.json' \
+    >/dev/null 2>&1 || warn "Could not write the backup status into ${DATA_VOLUME}."
+  rm -rf "${work}"
+}
+
 cmd_backup() {
   mkdir -p "${BACKUP_DIR}"
-  local stamp archive
+  local stamp archive started started_ms
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  started_ms="$(date +%s%3N)"
   archive="${BACKUP_DIR}/arcio-${stamp}.tar.gz"
+
+  # A failure has to be reported, not just raised. `set -e` would otherwise
+  # abort straight out of the function and leave Settings › Backup showing the
+  # previous success, which is the one lie this feature must not tell.
+  trap 'write_backup_status false "'"${started}"'" "'"${archive}"'" 0 0 "backup failed, see the log"' ERR
+
   local work
   work="$(mktemp -d)"
   # ${work:-}, not ${work}. A RETURN trap is set on the shell, not scoped to the
@@ -174,7 +266,7 @@ cmd_backup() {
   # restores every table and decrypts none of the credentials in them, which is
   # a restore that looks like it worked — so the two travel together.
   say "Copying the data volume..."
-  docker run --rm -v arcio_arcio-data:/data:ro -v "${work}:/out" alpine:3 \
+  docker run --rm -v "${DATA_VOLUME}:/data:ro" -v "${work}:/out" alpine:3 \
     tar -czf /out/data.tar.gz -C /data . 2>/dev/null
 
   tar -czf "${archive}" -C "${work}" arcio.sql data.tar.gz
@@ -185,6 +277,10 @@ cmd_backup() {
 
   ls -1t "${BACKUP_DIR}"/arcio-*.tar.gz 2>/dev/null | tail -n "+$((KEEP_BACKUPS + 1))" \
     | xargs -r rm -f
+
+  trap - ERR
+  write_backup_status true "${started}" "${archive}" \
+    "$(stat -c %s "${archive}")" "$(( $(date +%s%3N) - started_ms ))" ""
 
   ok "Backup: ${archive} ($(du -h "${archive}" | cut -f1))"
   echo "${archive}"
@@ -210,7 +306,7 @@ cmd_restore() {
   compose exec -T db psql -U arcio -d arcio -v ON_ERROR_STOP=1 < "${work}/arcio.sql"
 
   say "Restoring the data volume..."
-  docker run --rm -v arcio_arcio-data:/data -v "${work}:/in:ro" alpine:3 \
+  docker run --rm -v "${DATA_VOLUME}:/data" -v "${work}:/in:ro" alpine:3 \
     sh -c 'rm -rf /data/* && tar -xzf /in/data.tar.gz -C /data'
 
   compose up -d arcio
