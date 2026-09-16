@@ -52,9 +52,19 @@ DISK_SIZE="${ARCIO_DISK_SIZE:-40G}"
 say() { printf '\033[0;36m›\033[0m %s\n' "$*"; }
 ok() { printf '\033[0;32m✓\033[0m %s\n' "$*"; }
 
-VERSION="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<<"$(cat version.txt 2>/dev/null || echo unknown)" | head -1 || true)"
-VERSION="${VERSION:-unknown}"
-OUT="${BUILD}/arcio-os-${VERSION}.qcow2"
+# Two versions, and the artefact is named after both.
+#
+# It used to carry only Flatcar's, which is the wrong one to lead with: somebody
+# downloading "Arcio OS" wants to know which Arcio is inside it, and 4081.3.10
+# answers a question they did not ask. The OS version still matters — it is what
+# `arcioctl os-update` moves between — so it stays, second.
+#
+# ARCIO_APP_VERSION is optional because a development bake has nothing to claim:
+# the appliance follows the `stable` channel, and a channel is not a version.
+OS_VERSION="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<<"$(cat version.txt 2>/dev/null || echo unknown)" | head -1 || true)"
+OS_VERSION="${OS_VERSION:-unknown}"
+APP_VERSION="${ARCIO_APP_VERSION:-}"
+OUT="${BUILD}/arcio-os-${APP_VERSION:+${APP_VERSION}-}flatcar-${OS_VERSION}.qcow2"
 RAW="${BUILD}/work.raw"
 
 LOOP=""

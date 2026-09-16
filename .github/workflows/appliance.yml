@@ -1,0 +1,260 @@
+name: Appliance
+
+# Builds Arcio OS, signs it, and publishes it to a GitHub Release.
+#
+# ── Why this is a workflow and not a laptop ─────────────────────────────────
+#
+# The images were built by hand on a Proxmox node up to now, which was fine
+# while nothing was published. It stops being fine the moment somebody
+# downloads one, because `docs/distribution.md` rule 4 says a published
+# artefact carries a signature, an SBOM and provenance — and Cosign keyless
+# signing needs a workload identity to exchange for a certificate. A shell on
+# a hypervisor has no such identity. This job does, from `id-token: write`,
+# which is also why there is no signing key anywhere to be stolen.
+#
+# ── What it produces ───────────────────────────────────────────────────────
+#
+#   arcio-os-<arcio>-flatcar-<os>.qcow2   Proxmox, KVM, libvirt
+#   arcio-os-<arcio>-flatcar-<os>.ova     VMware
+#   arcio-os-<arcio>-flatcar-<os>.vhdx    Hyper-V generation 2
+#   …-.sha256   …-.sig   …-.pem           checksum, signature, certificate
+#   sbom.spdx.json                        every container image inside it
+#
+# ── Manual, not automatic ──────────────────────────────────────────────────
+#
+# `workflow_dispatch` only. An appliance image is roughly 3 GB of artefacts and
+# takes an Arcio release as input, so cutting one is a decision somebody makes
+# rather than a consequence of a push. It also means the Arcio version is
+# pinned by hand to an exact release: the image the bundle carries has to be a
+# fixed thing, even though the installed appliance then follows `stable` for
+# its updates.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arcio_version:
+        description: 'Arcio version to bundle, e.g. 0.11.0. An exact version, not a channel.'
+        required: true
+        type: string
+      flatcar_channel:
+        description: 'Flatcar channel'
+        required: false
+        default: 'lts'
+        type: string
+      publish:
+        description: 'Publish a GitHub Release. Off builds and signs without releasing.'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: appliance
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build, sign and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # A hosted runner has about 25 GB free and this needs most of it: a
+      # sparse 40 GB raw, a 1.1 GB image bundle, and three artefacts totalling
+      # 3 GB. The pre-installed toolchains are worth 15 GB and none of them are
+      # wanted here.
+      - name: Make room
+        run: |
+          # Every path is a literal. `"${AGENT_TOOLSDIRECTORY}"` would be the
+          # idiomatic last entry and expands to an empty string when unset,
+          # which is one typo away from being a very bad line in a root shell.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache || true
+          df -h /
+
+      - name: Install the build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils util-linux
+          curl -fsSLO https://github.com/coreos/butane/releases/latest/download/butane-x86_64-unknown-linux-gnu
+          sudo install -m 0755 butane-x86_64-unknown-linux-gnu /usr/local/bin/butane
+          butane --version
+
+      # The base OS, verified rather than trusted. Flatcar publishes a DIGESTS
+      # file beside every image; a download that does not match it is not the
+      # image they built, and this is the one input that becomes the whole
+      # operating system.
+      - name: Fetch and verify the Flatcar image
+        env:
+          CHANNEL: ${{ inputs.flatcar_channel }}
+        run: |
+          base="https://${CHANNEL}.release.flatcar-linux.net/amd64-usr/current"
+          curl -fsSLO "${base}/flatcar_production_qemu_image.img"
+          curl -fsSLO "${base}/flatcar_production_qemu_image.img.DIGESTS"
+          want="$(grep -iA1 '^# sha512' flatcar_production_qemu_image.img.DIGESTS \
+                  | grep -i 'flatcar_production_qemu_image.img$' | awk '{print $1}' | head -1)"
+          got="$(sha512sum flatcar_production_qemu_image.img | awk '{print $1}')"
+          if [ -z "${want}" ] || [ "${want}" != "${got}" ]; then
+            echo "::error::Flatcar image digest mismatch (want ${want:-none}, got ${got})"
+            exit 1
+          fi
+          echo "Flatcar image verified against its published DIGESTS."
+
+      - name: Transpile the Ignition config
+        env:
+          FLATCAR_CHANNEL: ${{ inputs.flatcar_channel }}
+        run: |
+          cd appliance
+          chmod +x ./*.sh
+          ./build.sh --fetch
+          # An appliance with a key in it is a development build. Assert it,
+          # because the build prints a warning and warnings scroll past.
+          if grep -q 'ssh-ed25519\|ssh-rsa' build/config.ign; then
+            echo "::error::An SSH key is baked into config.ign. This must never ship."
+            exit 1
+          fi
+
+      # Pinned to the exact version, not to `stable`. The bundle is the thing
+      # an air-gapped site installs from, so it has to be a fixed artefact;
+      # the appliance still follows `stable` for its own updates afterwards.
+      - name: Build the offline image bundle
+        env:
+          ARCIO_VERSION: ${{ inputs.arcio_version }}
+        run: |
+          cd appliance
+          ./bundle.sh
+
+      - name: Bake the image
+        env:
+          ARCIO_APP_VERSION: ${{ inputs.arcio_version }}
+        run: |
+          cd appliance
+          sudo --preserve-env=ARCIO_APP_VERSION ./bake.sh ../flatcar_production_qemu_image.img
+          sudo rm -f build/work.raw
+          df -h /
+
+      - name: Package the OVA and VHDX
+        run: |
+          cd appliance
+          qcow="$(ls build/arcio-os-*.qcow2)"
+          ./package.sh "${qcow}"
+          sudo chown "$(id -u):$(id -g)" build/arcio-os-* || true
+          ls -lh build/arcio-os-*
+
+      # What is actually inside the appliance, which is the container images
+      # the bundle carries. An SBOM of the Flatcar image itself would be
+      # Flatcar's to publish and they do; this is the part we assembled.
+      - name: SBOM of the bundled images
+        env:
+          ARCIO_VERSION: ${{ inputs.arcio_version }}
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sudo sh -s -- -b /usr/local/bin
+          syft --version
+          for image in \
+            "ghcr.io/element-digital/arcio:${ARCIO_VERSION}" \
+            "postgres:16-alpine" \
+            "caddy:2-alpine"; do
+            safe="$(echo "${image}" | tr '/:' '__')"
+            syft "${image}" -o spdx-json > "appliance/build/sbom-${safe}.spdx.json"
+          done
+          ls -lh appliance/build/sbom-*.json
+
+      - uses: sigstore/cosign-installer@v3
+
+      # Keyless, so there is no signing key in this repository or anywhere
+      # else. The certificate records which workflow, at which commit, signed
+      # which bytes, and `arcioctl import` already verifies blob signatures in
+      # exactly this shape.
+      - name: Sign every artefact
+        run: |
+          cd appliance/build
+          for f in arcio-os-*.qcow2 arcio-os-*.ova arcio-os-*.vhdx sbom-*.spdx.json; do
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "${f}"
+          done
+          ls -lh ./*.sig
+
+      - name: Verify what we just signed
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          cd appliance/build
+          for f in arcio-os-*.qcow2 arcio-os-*.ova arcio-os-*.vhdx; do
+            cosign verify-blob \
+              --certificate "${f}.pem" \
+              --signature "${f}.sig" \
+              --certificate-identity-regexp "https://github.com/${REPO}/.*" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${f}"
+          done
+          echo "Every artefact verifies."
+
+      - name: Release notes
+        id: notes
+        env:
+          ARCIO_VERSION: ${{ inputs.arcio_version }}
+        run: |
+          os="$(grep -m1 '^FLATCAR_VERSION=' appliance/version.txt | cut -d= -f2)"
+          echo "tag=appliance-v${ARCIO_VERSION}" >> "$GITHUB_OUTPUT"
+          {
+            echo "Arcio OS **${ARCIO_VERSION}**, on Flatcar Container Linux **${os}**."
+            echo
+            echo "| File | For | Tested |"
+            echo "| --- | --- | --- |"
+            echo "| \`.qcow2\` | Proxmox, KVM, libvirt | Boot-tested |"
+            echo "| \`.ova\` | VMware ESXi, vSphere, Workstation | Structure verified, not booted |"
+            echo "| \`.vhdx\` | Hyper-V **generation 2** | Structure verified, not booted |"
+            echo
+            echo "Hyper-V must be generation 2. The image is GPT with an EFI system"
+            echo "partition and no BIOS bootloader, so a generation 1 VM imports and"
+            echo "then fails to boot with no obvious cause. Set firmware to EFI on VMware"
+            echo "for the same reason."
+            echo
+            echo "It boots into a working Arcio with nothing supplied by the hypervisor,"
+            echo "and with no route to any registry: the container images travel inside"
+            echo "the image. The console prints the address to open, and setup happens in"
+            echo "a browser. There is no SSH key in a shipped appliance."
+            echo
+            echo "### Verify before you import"
+            echo
+            echo '```bash'
+            echo "sha256sum -c arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2.sha256"
+            echo
+            echo "cosign verify-blob \\"
+            echo "  --certificate arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2.pem \\"
+            echo "  --signature arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2.sig \\"
+            echo "  --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.*' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  arcio-os-${ARCIO_VERSION}-flatcar-${os}.qcow2"
+            echo '```'
+            echo
+            echo "An SPDX SBOM is attached for each container image inside the appliance."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Publish
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.notes.outputs.tag }}
+        run: |
+          gh release create "${TAG}" \
+            --title "Arcio OS ${{ inputs.arcio_version }}" \
+            --notes-file release-notes.md \
+            appliance/build/arcio-os-*.qcow2 \
+            appliance/build/arcio-os-*.ova \
+            appliance/build/arcio-os-*.vhdx \
+            appliance/build/arcio-os-*.sha256 \
+            appliance/build/arcio-os-*.sig \
+            appliance/build/arcio-os-*.pem \
+            appliance/build/sbom-*.spdx.json \
+            appliance/build/sbom-*.sig \
+            appliance/build/sbom-*.pem
